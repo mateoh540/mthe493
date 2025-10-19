@@ -24,10 +24,10 @@ class Node:
         self.memory_size = memory_size
         self.history = []  # Will store last M draws
 
-    def get_porportion(self):
+    def get_proportion(self): # Returns the Proportion of Red Balls in the Urn
         return self.urn_red / (self.urn_red + self.urn_black)
     
-    def update_urn(self, draw_result):
+    def update(self, draw_result): # Updates the Contents of the Urn
         # Add new balls
         if draw_result == 1:
             self.urn_red += 1
@@ -38,16 +38,16 @@ class Node:
 
 class Network:
     def __init__(self):
+        self.nodes = {}
         pass
-    def initialize_erdos_renyi(self, network_type, num_nodes, probability):
-        if(network_type == "Erdos-Renyi"):
-            self.graph = nx.erdos_renyi_graph(num_nodes, probability)
-            for node_id in self.graph.nodes():
-                self.nodes[node_id] = Node(
-                    node_id=node_id,
-                )
+    def initialize_erdos_renyi(self, num_nodes, probability): # Initialize a Erdos-Renyi Graph
+        self.graph = nx.erdos_renyi_graph(num_nodes, probability)
+        for node_id in self.graph.nodes():
+            self.nodes[node_id] = Node(
+                node_id=node_id,
+            )
         
-    def get_super_urn_porportion(self, node_id): # Get Super Urn Properties for a Node
+    def get_super_urn_proportion(self, node_id): # Get Super Urn Properties for a Node
         # Get Node and Neighbours
         node = self.nodes[node_id]
         neighbors = list(self.graph.neighbors(node_id))
@@ -62,42 +62,55 @@ class Network:
                 total_balls += neighbor.urn_red + neighbor.urn_black
         return total_red / total_balls
 
-    def get_network_metrics(self):
+    def get_network_metrics(self): # Get the Contagion Metrics of the Network
         U_bar = 0
         S_bar = 0
         n = len(self.nodes)
         for node_id, node in self.nodes.items():
-            U_bar += node.get_personal_proportion()
+            U_bar += node.get_proportion()
             S_bar += self.get_super_urn_proportion(node_id)
         U_bar /= n
         S_bar /= n
         return U_bar, S_bar
 
+    def simulate_step(self): # Simulate a Step in the Network Smulation
+        draws = {}
+        proportions = {}
 
-    def simulate_step(self):
-        for node_id in len(self.nodes):
-            node = self.nodes[node_id]
-            proportion = network.get_super_urn_porportion(node_id)
-            draw_result = np.random.binomial(1, proportion)
+        # Get Proportions
+        for node_id in self.nodes:
+            proportions[node_id] = self.get_super_urn_proportion(node_id)
         
+        # Perform Draws
+        for node_id, proportion in proportions.items():
+            draw_result = 1 if np.random.random() < proportion else 0
+            draws[node_id] = draw_result
         
-
-
-        pass
+        # Update all nodes
+        for node_id, draw_result in draws.items():
+            self.nodes[node_id].update(draw_result)
 
 
 class SimulationRunner:
     def __init__(self):
         pass
-    def run_simulation(self, network, num_steps, mitigation_strategy, budget):
-        pass
+    def run_simulation(self, network_type, num_steps):
+        if network_type == "erdos renyi":
+            network = Network()
+            network.initialize_erdos_renyi(100, 0.2)
+        simulation_data = np.zeros((num_steps, 2))
+        for i in range(num_steps):
+            network.simulate_step()            
+            U_bar, S_bar = network.get_network_metrics()
+            simulation_data[i, 0] = U_bar
+            simulation_data[i, 1] = S_bar
+        return simulation_data
+        
     def evaluate_strategy(run_data):
         pass
 
 
 # === Initialize and Run Simulation
-num_nodes = 100
-network = Network(G)
 simulationRunner = SimulationRunner()
-
-simulationRunner.run_simulation()
+simulation_data = simulationRunner.run_simulation("erdos renyi", 100)
+print(simulation_data)
