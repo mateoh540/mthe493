@@ -12,11 +12,12 @@ import scipy as sp
 import math
 import random
 import time
+from collections import deque
 
 
 # === Declarations ===
 class Node:
-    def __init__(self, node_id, initial_red=5, initial_black=5, delta_red=1, delta_black=1, memory_size=10):
+    def __init__(self, node_id, initial_red=5, initial_black=5, delta_red=10, delta_black=10, memory_size=10):
         self.node_id = node_id
         self.urn_red = initial_red
         self.urn_black = initial_black
@@ -24,24 +25,45 @@ class Node:
         self.delta_black = delta_black
         self.memory_size = memory_size
         self.history = [] 
+        self.draw_queue = deque()
 
     def get_proportion(self): # Returns the Proportion of Red Balls in the Urn
         return self.urn_red / (self.urn_red + self.urn_black)
     
     def update(self, draw_result): # Updates the Contents of the Urn
-        # Add new balls
-        if draw_result == 1:
-            self.urn_red += self.delta_red
+        # Find the oldest draw result from memory
+        self.draw_queue.append(draw_result) 
+        if len(self.draw_queue) > self.memory_size:
+            draw_result_memory = self.draw_queue.popleft()
         else:
-            self.urn_black += self.delta_black
+            draw_result_memory = None
 
-        # Remove old bars from memory
+        # Update the urn content by adding the current balls and removing the oldest balls from memory
+        if draw_result == 1:
+            self.urn_red += 1*self.delta_red
+        else:
+            self.urn_black += 1*self.delta_black
+        if draw_result_memory != None:
+            if draw_result_memory == 1:
+                self.urn_red -= 1*self.delta_red
+            else:
+                self.urn_black -= 1*self.delta_black
 
+        # Ensure non-negative urn counts (safety check)
+        self.urn_red = max(0, self.urn_red)
+        self.urn_black = max(0, self.urn_black)
 
+    def show_contents(self):
+        print(self.urn_red)
+        print(self.urn_black)
+        print(self.draw_queue)
+
+        
 class Network:
     def __init__(self):
         self.nodes = {}
-        pass
+        
+
     def initialize_erdos_renyi(self, num_nodes, probability): # Initialize a Erdos-Renyi Graph
         self.graph = nx.erdos_renyi_graph(num_nodes, probability)
         for node_id in self.graph.nodes():
@@ -92,13 +114,17 @@ class Network:
         # Update all nodes
         for node_id, draw_result in draws.items():
             self.nodes[node_id].update(draw_result)
+        
+        # Debugging
+        self.nodes[1].show_contents()
+
 class SimulationRunner:
     def __init__(self):
         pass
     def run_simulation(self, network_type, num_steps, visualize):
         if network_type == "erdos renyi":
             network = Network()
-            network.initialize_erdos_renyi(50, 0.5)
+            network.initialize_erdos_renyi(10, 0.5)
         simulation_data = np.zeros((num_steps, 2))
 
         if visualize:
