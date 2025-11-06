@@ -13,11 +13,12 @@ import math
 import random
 import time
 from collections import deque
+import argparse
 
 
 # === Declarations ===
 class Node:
-    def __init__(self, node_id, initial_red=5, initial_black=5, delta_red=10, delta_black=10, memory_size=10):
+    def __init__(self, node_id, initial_red=5, initial_black=5, delta_red=10, delta_black=5, memory_size=10):
         self.node_id = node_id
         self.urn_red = initial_red
         self.urn_black = initial_black
@@ -56,20 +57,22 @@ class Node:
     def show_contents(self):
         print(self.urn_red)
         print(self.urn_black)
-        print(self.draw_queue)
-
-        
+        print(self.draw_queue)  
 class Network:
     def __init__(self):
         self.nodes = {}
-        
-
     def initialize_erdos_renyi(self, num_nodes, probability): # Initialize a Erdos-Renyi Graph
         self.graph = nx.erdos_renyi_graph(num_nodes, probability)
         for node_id in self.graph.nodes():
             self.nodes[node_id] = Node(
                 node_id=node_id,
 
+            )
+    def initialize_barabasi_albert(self, n, m):
+        self.graph = nx.barabasi_albert_graph(n, m)
+        for node_id in self.graph.nodes():
+            self.nodes[node_id] = Node(
+                node_id=node_id,
             )
         
     def get_super_urn_proportion(self, node_id): # Get Super Urn Properties for a Node
@@ -117,16 +120,21 @@ class Network:
         
         # Debugging
         self.nodes[1].show_contents()
-
 class SimulationRunner:
     def __init__(self):
         pass
     def run_simulation(self, network_type, num_steps, visualize):
-        if network_type == "erdos renyi":
-            network = Network()
-            network.initialize_erdos_renyi(10, 0.5)
-        simulation_data = np.zeros((num_steps, 2))
+        match network_type:
+            case "erdos renyi":
+                network = Network()
+                network.initialize_erdos_renyi(10, 0.5)
+            case "barabasi albert":
+                network = Network()
+                network.initialize_barabasi_albert(100, 3)
+            case _:
+                return "Invalid Graph Type"
 
+        simulation_data = np.zeros((num_steps, 2))
         if visualize:
             # Initialize real-time visualization
             self.setup_real_time_visualization(network)
@@ -220,6 +228,23 @@ class SimulationRunner:
                 for node_id in network.graph.nodes()]
 
 # === Initialize and Run Simulation
-simulationRunner = SimulationRunner()
-simulation_data = simulationRunner.run_simulation("erdos renyi", 100, 1)
-print(simulation_data)
+
+def main():
+    parser = argparse.ArgumentParser(description='Run Polya Network Simulation')
+    parser.add_argument('--network_type', type=str, default='erdos renyi', 
+                       choices=['erdos renyi', 'barabasi albert'],
+                       help='Type of network to simulate')
+    parser.add_argument('--steps', type=int, default=100,
+                       help='Number of simulation steps')
+    parser.add_argument('--visualization', type=int, default=1,
+                       help='Enable real-time visualization')
+    args = parser.parse_args()
+    
+    simulationRunner = SimulationRunner()
+    simulation_data = simulationRunner.run_simulation(
+        args.network_type, args.steps, args.visualization
+    )
+    print(simulation_data)
+
+if __name__ == "__main__":
+    main()
