@@ -5,6 +5,8 @@ import random
 import time
 from collections import deque
 import argparse
+import pandas as pd
+import datetime
 
 
 # ==========================================================
@@ -47,7 +49,6 @@ class Node:
         self.urn_red = max(0, self.urn_red)
         self.urn_black = max(0, self.urn_black)
 
-
 # ==========================================================
 # Network class (static + switched)
 # ==========================================================
@@ -58,25 +59,13 @@ class Network:
         self.p_dominating = 0.5  # probability of dominating node
 
     # ---------- Initializers ----------
-    def initialize_erdos_renyi(self, num_nodes, probability):
-        self.graph = nx.erdos_renyi_graph(num_nodes, probability)
-        for nid in self.graph.nodes():
-            self.nodes[nid] = Node(nid)
-
     def initialize_barabasi_albert(self, n, m):
         self.graph = nx.barabasi_albert_graph(n, m)
         for nid in self.graph.nodes():
             self.nodes[nid] = Node(nid)
 
-    def initialize_switch_network(self, initial_nodes=5, p_dominating=0.5):
-        """Start with an empty graph of initial_nodes."""
-        self.graph = nx.complete_graph(initial_nodes)
-        self.nodes = {i: Node(i) for i in range(initial_nodes)}
-        self.p_dominating = p_dominating
-
     # ---------- Switching dynamics ----------
     def switch_network(self, new_nodes=1):
-        """Add new nodes with contagion-aware switch dynamics"""
         start_idx = len(self.nodes)
         for i in range(new_nodes):
             new_id = start_idx + i
@@ -87,8 +76,10 @@ class Network:
                 self.graph.add_node(new_id)
                 self.nodes[new_id] = Node(
                     node_id=new_id,
-                    initial_red=15,
-                    initial_black=2
+                    initial_red=10,
+                    initial_black=5,
+                    delta_red=10, 
+                    delta_black=5
                 )
                 for existing in list(self.graph.nodes()):
                     if existing != new_id:
@@ -101,17 +92,19 @@ class Network:
                 self.graph.add_node(new_id)
                 self.nodes[new_id] = Node(
                     node_id=new_id,
-                    initial_red=2,
-                    initial_black=15
+                    initial_red=5,
+                    initial_black=10,
+                    delta_red=5, 
+                    delta_black=10
                 )
                 print(f"Added isolated (black) node {new_id}")
 
-                # Add one black ball to every *existing* node (global truth effect)
-                for existing_id, node in self.nodes.items():
-                    if existing_id != new_id:
-                        node.urn_black += 1
+                # # Add one black ball to every *existing* node (global truth effect)
+                # for existing_id, node in self.nodes.items():
+                #     if existing_id != new_id:
+                #         node.urn_black += 1
 
-                print("Added one black ball to every other node (global correction)")
+                # print("Added one black ball to every other node (global correction)")
 
     # ---------- Super-urn calculations ----------
     def get_super_urn_proportion(self, node_id):
@@ -149,20 +142,10 @@ class SimulationRunner:
     def __init__(self):
         pass
 
-    def run_simulation(self, network_type, num_steps=100,
-                       visualize=True, k_switch=10, new_nodes=5, initial_nodes=5):
-        """Run contagion simulation with optional switching."""
+    def run_simulation(self, visualize, switch_network, num_steps, initial_nodes):
         network = Network()
-        if network_type == "erdos renyi":
-            network.initialize_erdos_renyi(num_nodes=initial_nodes, probability=0.5)
-        elif network_type == "barabasi albert":
-            m = min(3, initial_nodes - 1)  # avoid invalid BA parameter
-            network.initialize_barabasi_albert(n=initial_nodes, m=m)
-        elif network_type == "switch":
-            network.initialize_switch_network(initial_nodes=initial_nodes)
-        else:
-            raise ValueError("Invalid network type.")
-
+        m = min(3, initial_nodes - 1)  # avoid invalid BA parameter
+        network.initialize_barabasi_albert(n=initial_nodes, m=m)       
         simulation_data = np.zeros((num_steps, 2))
 
         if visualize:
@@ -173,30 +156,29 @@ class SimulationRunner:
             U_bar, S_bar = network.get_network_metrics()
             simulation_data[step] = [U_bar, S_bar]
 
-            if network_type == "switch":
+            if switch_network:
                 network.switch_network(new_nodes=1)
                 if visualize:
-                    self.pos = nx.spring_layout(network.graph, seed=42)
+                     self.pos = nx.spring_layout(network.graph, seed=42)
 
             if visualize:
                 self.update_real_time_visualization(network, simulation_data, step)
-                time.sleep(3)
 
         if visualize:
             plt.ioff()
             plt.show()
 
-        if not visualize:
-            steps = np.arange(num_steps)
-            plt.figure(figsize=(6, 4))
-            plt.plot(steps, simulation_data[:, 0], 'b-', label='Ūₙ')
-            plt.plot(steps, simulation_data[:, 1], 'g-', label='S̄ₙ')
-            plt.xlabel('Steps')
-            plt.ylabel('Proportion')
-            plt.legend()
-            plt.title('Final Results (Static Plot)')
-            plt.grid(True, alpha=0.3)
-            plt.show()
+        # if not visualize:
+        #     steps = np.arange(num_steps)
+        #     plt.figure(figsize=(6, 4))
+        #     plt.plot(steps, simulation_data[:, 0], 'b-', label='Ūₙ')
+        #     plt.plot(steps, simulation_data[:, 1], 'g-', label='S̄ₙ')
+        #     plt.xlabel('Steps')
+        #     plt.ylabel('Proportion')
+        #     plt.legend()
+        #     plt.title('Final Results (Static Plot)')
+        #     plt.grid(True, alpha=0.3)
+        #     plt.show()
 
         return simulation_data
 
@@ -241,26 +223,53 @@ class SimulationRunner:
 # Entry Point
 # ==========================================================
 def main():
+    # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Switch-Network Simulation")
-    parser.add_argument("--network_type", type=str,
-                        default="switch",
-                        choices=["erdos renyi", "barabasi albert", "switch"])
-    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--visualize", type=int, default=1)
-    parser.add_argument("--initial_nodes", type=int, default=5,
-                        help="Initial number of nodes for any network type")
+    parser.add_argument("--switch_network", type=int, default=1)
+    parser.add_argument("--iterations", type=int, default=1)
     args = parser.parse_args()
 
-    sim = SimulationRunner()
-    data = sim.run_simulation(
-        args.network_type,
-        num_steps=args.steps,
-        visualize=bool(args.visualize),
-        k_switch=10,
-        new_nodes=5,
-        initial_nodes=args.initial_nodes
-    )
-    print("Final metrics (Ūₙ, S̄ₙ):", data[-1])
+    # Run Simulation
+    total_data = []
+    for i in range(args.iterations):
+        sim = SimulationRunner()
+        data = sim.run_simulation(
+            visualize=bool(args.visualize),
+            switch_network = args.switch_network,
+            num_steps = args.steps,
+            initial_nodes= 100 
+        )
+        print("Final metrics (Ūₙ, S̄ₙ):", data[-1])
+        total_data.append(data)
+
+    all_data_array = np.array(total_data)  
+    print(all_data_array)
+    # Plot
+    # Calculate and plot averages
+    avg_U = np.mean(all_data_array[:, :, 0], axis=0)
+    avg_S = np.mean(all_data_array[:, :, 1], axis=0)
+    plt.figure(figsize=(10, 6))
+    plt.plot(avg_S, 'g-', label='S̄ₙ', linewidth=2)
+    plt.xlabel('Time Steps')
+    plt.ylabel('Proportion')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+    # Export all data
+    iterations, steps, metrics = all_data_array.shape
+    all_df = pd.DataFrame({
+        'iteration': np.repeat(range(iterations), steps),
+        'step': np.tile(range(steps), iterations),
+        'U_bar': all_data_array[:, :, 0].flatten(),
+        'S_bar': all_data_array[:, :, 1].flatten()
+    })
+    all_df.to_csv('simulation_all_data.csv', index=False)
+    
+
+    
 
 
 if __name__ == "__main__":

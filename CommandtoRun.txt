@@ -2,6 +2,10 @@ Below is an exmaple command to run:
 
 python simulation.py --network_type "switch" --steps 10 --initial_nodes 5 --visualize 1
 
+New command: 
+
+python simulation.py --steps 1000 --visualize 0 --switch_network 1 --iterations 10
+
 
 
 Parameters:
