@@ -7,6 +7,7 @@ from collections import deque
 import argparse
 import pandas as pd
 import datetime
+import json
 
 
 # ==========================================================
@@ -59,10 +60,11 @@ class Network:
         self.p_dominating = 0.5  # probability of dominating node
 
     # ---------- Initializers ----------
-    def initialize_barabasi_albert(self, n, m):
+    def initialize_barabasi_albert(self, n, m, initial_conditions):
         self.graph = nx.barabasi_albert_graph(n, m)
+        delta_red, delta_black = initial_conditions
         for nid in self.graph.nodes():
-            self.nodes[nid] = Node(nid)
+            self.nodes[nid] = Node(nid, delta_red=delta_red, delta_black=delta_black)
 
     # ---------- Switching dynamics ----------
     def switch_network(self, new_nodes=1):
@@ -85,7 +87,6 @@ class Network:
                     if existing != new_id:
                         self.graph.add_edge(new_id, existing)
 
-                print(f"Added dominating (red) node {new_id}")
 
             else:
                 # Isolated node – dominantly black, no edges
@@ -97,12 +98,11 @@ class Network:
                     delta_red=5, 
                     delta_black=10
                 )
-                print(f"Added isolated (black) node {new_id}")
 
-                # # Add one black ball to every *existing* node (global truth effect)
-                # for existing_id, node in self.nodes.items():
-                #     if existing_id != new_id:
-                #         node.urn_black += 1
+                # Add one black ball to every *existing* node (global truth effect)
+                for existing_id, node in self.nodes.items():
+                    if existing_id != new_id:
+                        node.urn_black += 1
 
                 # print("Added one black ball to every other node (global correction)")
 
@@ -142,53 +142,45 @@ class SimulationRunner:
     def __init__(self):
         pass
 
-    def run_simulation(self, visualize, switch_network, num_steps, initial_nodes):
-        network = Network()
-        m = min(3, initial_nodes - 1)  # avoid invalid BA parameter
-        network.initialize_barabasi_albert(n=initial_nodes, m=m)       
-        simulation_data = np.zeros((num_steps, 2))
+    def run_simulation(self, visualize, switch_network, num_steps, iterations, initial_conditions, initial_nodes):
 
-        if visualize:
-            self.setup_real_time_visualization(network, num_steps)
-
-        for step in range(num_steps):
-            network.simulate_step()
-            U_bar, S_bar = network.get_network_metrics()
-            simulation_data[step] = [U_bar, S_bar]
-
-            if switch_network:
-                network.switch_network(new_nodes=1)
-                if visualize:
-                     self.pos = nx.spring_layout(network.graph, seed=42)
-
+        simulation_data = np.zeros((iterations, num_steps, 2))
+        for i in range(iterations):
+            network = Network()
+            m = 1
+            network.initialize_barabasi_albert(n=initial_nodes, m=m, initial_conditions=initial_conditions)       
+            
             if visualize:
-                self.update_real_time_visualization(network, simulation_data, step)
+                self.setup_real_time_visualization(network, num_steps)
+                for step in range(num_steps):
+                    network.simulate_step()
+                    U_bar, S_bar = network.get_network_metrics()
+                    simulation_data[i, step] = [U_bar, S_bar]
+                    if switch_network:
+                        network.switch_network(new_nodes=1)
+                        self.pos = nx.spring_layout(network.graph, seed=42)
+                    self.update_real_time_visualization(network, simulation_data[i], step)
 
-        if visualize:
-            plt.ioff()
-            plt.show()
-
-        # if not visualize:
-        #     steps = np.arange(num_steps)
-        #     plt.figure(figsize=(6, 4))
-        #     plt.plot(steps, simulation_data[:, 0], 'b-', label='Ūₙ')
-        #     plt.plot(steps, simulation_data[:, 1], 'g-', label='S̄ₙ')
-        #     plt.xlabel('Steps')
-        #     plt.ylabel('Proportion')
-        #     plt.legend()
-        #     plt.title('Final Results (Static Plot)')
-        #     plt.grid(True, alpha=0.3)
-        #     plt.show()
+                plt.ioff()
+                plt.show()
+                plt.close(self.fig)
+            else:
+                for step in range(num_steps):
+                    network.simulate_step()
+                    U_bar, S_bar = network.get_network_metrics()
+                    simulation_data[i, step] = [U_bar, S_bar]
+                    if switch_network:
+                        network.switch_network(new_nodes=1)
 
         return simulation_data
 
     # ---------- visualization helpers ----------
     def setup_real_time_visualization(self, network, num_steps):
         plt.ion()
-        self.fig, (self.ax_net, self.ax_met) = plt.subplots(1, 2, figsize=(14, 6))
+        self.fig, (self.ax_net, self.ax_met) = plt.subplots(1, 2, figsize=(14, 6),
+                                                            gridspec_kw={'width_ratios': [2, 1]})
         self.pos = nx.spring_layout(network.graph, seed=42)
         self._draw_network(network)
-        self.metrics_line_u, = self.ax_met.plot([], [], 'b-', label='Ūₙ')
         self.metrics_line_s, = self.ax_met.plot([], [], 'g-', label='S̄ₙ')
         self.ax_met.set_xlim(0, num_steps)
         self.ax_met.set_xticks(range(0, num_steps + 1, max(1, num_steps // 10)))
@@ -211,12 +203,12 @@ class SimulationRunner:
     def update_real_time_visualization(self, network, data, step):
         self._draw_network(network)
         steps = np.arange(step + 1)
-        self.metrics_line_u.set_data(steps, data[:step + 1, 0])
         self.metrics_line_s.set_data(steps, data[:step + 1, 1])
         self.ax_met.relim()
         self.ax_met.autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
 
 
 # ==========================================================
@@ -227,31 +219,34 @@ def main():
     parser = argparse.ArgumentParser(description="Run Polya Switch-Network Simulation")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--visualize", type=int, default=1)
-    parser.add_argument("--switch_network", type=int, default=1)
+    parser.add_argument("--switch_network", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     args = parser.parse_args()
 
     # Run Simulation
-    total_data = []
-    for i in range(args.iterations):
+    total_simulation_data = []
+    for i in range(len(args.initial_conditions)):
         sim = SimulationRunner()
-        data = sim.run_simulation(
+        simulation_data = sim.run_simulation(
             visualize=bool(args.visualize),
             switch_network = args.switch_network,
             num_steps = args.steps,
+            iterations = args.iterations,
+            initial_conditions = args.initial_conditions[i],
             initial_nodes= 100 
         )
-        print("Final metrics (Ūₙ, S̄ₙ):", data[-1])
-        total_data.append(data)
+        total_simulation_data.append(simulation_data)
 
-    all_data_array = np.array(total_data)  
-    print(all_data_array)
+    data = np.array(total_simulation_data)  
+    print(data)
     # Plot
     # Calculate and plot averages
-    avg_U = np.mean(all_data_array[:, :, 0], axis=0)
-    avg_S = np.mean(all_data_array[:, :, 1], axis=0)
     plt.figure(figsize=(10, 6))
-    plt.plot(avg_S, 'g-', label='S̄ₙ', linewidth=2)
+    for i in range(len(args.initial_conditions)):
+        avg_S = np.mean(data[i, :, :, 1], axis=0)
+        avg_S = np.insert(avg_S, 0, 0.5)
+        plt.plot(avg_S, label=f'S̄ₙ for Initial Conditions {args.initial_conditions[i]}', linewidth=2)
     plt.xlabel('Time Steps')
     plt.ylabel('Proportion')
     plt.legend()
@@ -259,17 +254,14 @@ def main():
     plt.show()
 
     # Export all data
-    iterations, steps, metrics = all_data_array.shape
+    initial_conditions, iterations, steps, metric = data.shape
     all_df = pd.DataFrame({
+        'initial_condition': np.repeat(range(initial_conditions), steps),
         'iteration': np.repeat(range(iterations), steps),
         'step': np.tile(range(steps), iterations),
-        'U_bar': all_data_array[:, :, 0].flatten(),
-        'S_bar': all_data_array[:, :, 1].flatten()
+        'S_bar': data[:, :, 1].flatten()
     })
     all_df.to_csv('simulation_all_data.csv', index=False)
-    
-
-    
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ python simulation.py --network_type "switch" --steps 10 --initial_nodes 5 --visu
 New command: 
 
 python simulation.py --steps 1000 --visualize 0 --switch_network 1 --iterations 10
+python simulation.py --steps 100 --visualize 0 --switch_network 0 --iterations 1 --initial_conditions [[10,5],[7,5],[5,5],[5,7],[5,10]]
 
 
 
