@@ -9,6 +9,11 @@ import pandas as pd
 import datetime
 import json
 
+from matplotlib.colors import LinearSegmentedColormap
+
+RED_BLACK_CMAP = LinearSegmentedColormap.from_list("red_black", ["black", "red"])
+
+
 
 # ==========================================================
 # Node class
@@ -80,12 +85,14 @@ class Network:
                     node_id=new_id,
                     initial_red=10,
                     initial_black=5,
-                    delta_red=10, 
+                    delta_red=5, 
                     delta_black=5
                 )
+                # Connect to 70%
                 for existing in list(self.graph.nodes()):
                     if existing != new_id:
-                        self.graph.add_edge(new_id, existing)
+                        if random.random() < 0.5:
+                            self.graph.add_edge(new_id, existing)
 
 
             else:
@@ -96,13 +103,20 @@ class Network:
                     initial_red=5,
                     initial_black=10,
                     delta_red=5, 
-                    delta_black=10
+                    delta_black=5
                 )
+                # 50% of connecting to 3 most popular nodes
+                degrees = dict(self.graph.degree())
+                degrees.pop(new_id, None)
+                top3 = sorted(degrees, key=degrees.get, reverse=True)[:3]
+                for node in top3:
+                    if random.random() < 0.5:
+                        self.graph.add_edge(new_id, node)
 
                 # Add one black ball to every *existing* node (global truth effect)
-                for existing_id, node in self.nodes.items():
-                    if existing_id != new_id:
-                        node.urn_black += 1
+                # for existing_id, node in self.nodes.items():
+                #     if existing_id != new_id:
+                #         node.urn_black += 1
 
                 # print("Added one black ball to every other node (global correction)")
 
@@ -151,7 +165,7 @@ class SimulationRunner:
             network.initialize_barabasi_albert(n=initial_nodes, m=m, initial_conditions=initial_conditions)       
             
             if visualize:
-                self.setup_real_time_visualization(network, num_steps)
+                self.setup_real_time_visualization(network, num_steps, initial_conditions)
                 for step in range(num_steps):
                     network.simulate_step()
                     U_bar, S_bar = network.get_network_metrics()
@@ -159,7 +173,7 @@ class SimulationRunner:
                     if switch_network:
                         network.switch_network(new_nodes=1)
                         self.pos = nx.spring_layout(network.graph, seed=42)
-                    self.update_real_time_visualization(network, simulation_data[i], step)
+                    self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
 
                 plt.ioff()
                 plt.show()
@@ -175,13 +189,23 @@ class SimulationRunner:
         return simulation_data
 
     # ---------- visualization helpers ----------
-    def setup_real_time_visualization(self, network, num_steps):
+    def setup_real_time_visualization(self, network, num_steps, initial_conditions):
         plt.ion()
-        self.fig, (self.ax_net, self.ax_met) = plt.subplots(1, 2, figsize=(14, 6),
-                                                            gridspec_kw={'width_ratios': [2, 1]})
+        self.fig, (self.ax_net, self.ax_met) = plt.subplots(
+            1, 2, figsize=(14, 6), gridspec_kw={'width_ratios': [2, 1]}
+        )
+
+        # Initial layout computed ONCE
         self.pos = nx.spring_layout(network.graph, seed=42)
-        self._draw_network(network)
-        self.metrics_line_s, = self.ax_met.plot([], [], 'g-', label='S̄ₙ')
+
+        # Draw once to fix initial limits
+        self._draw_network(network, initial_conditions)
+
+        # Save initial axis limits so they stay fixed later
+        self.xlim = self.ax_net.get_xlim()
+        self.ylim = self.ax_net.get_ylim()
+
+        self.metrics_line_s, = self.ax_met.plot([], [], 'g-', label=r'Network Exposure ($\bar{S}_n$)')
         self.ax_met.set_xlim(0, num_steps)
         self.ax_met.set_xticks(range(0, num_steps + 1, max(1, num_steps // 10)))
         self.ax_met.set_ylim(0, 1)
@@ -191,17 +215,90 @@ class SimulationRunner:
         self.ax_met.grid(True, alpha=0.3)
         plt.tight_layout()
 
-    def _draw_network(self, network):
-        node_colors = [n.get_proportion() for n in network.nodes.values()]
+
+    def _update_positions_for_new_nodes(self, network):
+        """
+        Ensure every node in network.graph has a position in self.pos.
+        New nodes get placed near their neighbors or near the existing center.
+        """
+        existing_nodes = set(self.pos.keys())
+
+        # Precompute center of existing layout
+        xs = [p[0] for p in self.pos.values()]
+        ys = [p[1] for p in self.pos.values()]
+        cx, cy = float(np.mean(xs)), float(np.mean(ys))
+
+        for node in network.graph.nodes():
+            if node in existing_nodes:
+                continue
+
+            neighbors = [n for n in network.graph.neighbors(node) if n in self.pos]
+
+            if neighbors:
+                # Place at the mean of neighbor positions
+                nxs = [self.pos[n][0] for n in neighbors]
+                nys = [self.pos[n][1] for n in neighbors]
+                self.pos[node] = (float(np.mean(nxs)), float(np.mean(nys)))
+            else:
+                # No neighbors with known positions yet: drop near center with small jitter
+                self.pos[node] = (
+                    cx + 0.1 * np.random.randn(),
+                    cy + 0.1 * np.random.randn(),
+                )
+
+
+    def _draw_network(self, network, initial_conditions):
+        # Map proportion to hard colors
+        node_colors = [
+            'red' if n.get_proportion() >= 0.5 else 'black'
+            for n in network.nodes.values()
+        ]
+
+        keep_limits = hasattr(self, "xlim") and hasattr(self, "ylim")
+        if keep_limits:
+            xlim, ylim = self.xlim, self.ylim
+
         self.ax_net.clear()
-        nx.draw_networkx(network.graph, pos=self.pos, ax=self.ax_net,
-                         node_color=node_colors, cmap='coolwarm',
-                         node_size=250, vmin=0, vmax=1, with_labels=True)
-        self.ax_net.set_title("Network State")
+        nx.draw_networkx(
+            network.graph, pos=self.pos, ax=self.ax_net,
+            node_color=node_colors,
+            node_size=250, with_labels=True
+        )
+        self.ax_net.set_title("Network")
         self.ax_net.axis('off')
 
-    def update_real_time_visualization(self, network, data, step):
-        self._draw_network(network)
+        # Initial Conditions Box (unchanged)
+        textstr = (
+            rf'$\Delta_r = {initial_conditions[0]},\ \Delta_b = {initial_conditions[1]}$'
+            '\n'
+            r'$r_{(i, n)} = 5,\ b_{(i,n)} = 5$'
+        )
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+        self.ax_net.text(
+            0.05, 0.95, textstr,
+            transform=self.ax_net.transAxes,
+            fontsize=10,
+            verticalalignment='top',
+            bbox=props
+        )
+
+        if keep_limits:
+            self.ax_net.set_xlim(xlim)
+            self.ax_net.set_ylim(ylim)
+        else:
+            self.xlim = self.ax_net.get_xlim()
+            self.ylim = self.ax_net.get_ylim()
+
+
+
+    def update_real_time_visualization(self, network, data, step, initial_conditions):
+        # Give positions to any new nodes without disturbing old ones
+        self._update_positions_for_new_nodes(network)
+
+        # Redraw network with fixed layout & fixed axis limits
+        self._draw_network(network, initial_conditions)
+
+        # Metrics panel stays dynamic
         steps = np.arange(step + 1)
         self.metrics_line_s.set_data(steps, data[:step + 1, 1])
         self.ax_met.relim()
