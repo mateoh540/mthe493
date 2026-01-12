@@ -149,6 +149,21 @@ class Network:
             self.nodes[i].update(d)
 
 
+    def apply_curing(self, curing_strategy):
+        match curing_strategy:
+            case "gradient":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+            case "heuristic":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+            case "supermartingale":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+
 # ==========================================================
 # Simulation Runner with visualization
 # ==========================================================
@@ -156,8 +171,8 @@ class SimulationRunner:
     def __init__(self):
         pass
 
-    def run_simulation(self, visualize, switch_network, num_steps, iterations, initial_conditions, initial_nodes):
-
+    def run_simulation(self, visualize, switch_network, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
+    
         simulation_data = np.zeros((iterations, num_steps, 2))
         for i in range(iterations):
             network = Network()
@@ -181,14 +196,13 @@ class SimulationRunner:
             else:
                 for step in range(num_steps):
                     network.simulate_step()
+                    network.apply_curing(curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
                     if switch_network:
                         network.switch_network(new_nodes=1)
 
         return simulation_data
-
-    # ---------- visualization helpers ----------
     def setup_real_time_visualization(self, network, num_steps, initial_conditions):
         plt.ion()
         self.fig, (self.ax_net, self.ax_met) = plt.subplots(
@@ -214,7 +228,6 @@ class SimulationRunner:
         self.ax_met.legend()
         self.ax_met.grid(True, alpha=0.3)
         plt.tight_layout()
-
 
     def _update_positions_for_new_nodes(self, network):
         """
@@ -245,7 +258,6 @@ class SimulationRunner:
                     cx + 0.1 * np.random.randn(),
                     cy + 0.1 * np.random.randn(),
                 )
-
 
     def _draw_network(self, network, initial_conditions):
         # Map proportion to hard colors
@@ -289,8 +301,6 @@ class SimulationRunner:
             self.xlim = self.ax_net.get_xlim()
             self.ylim = self.ax_net.get_ylim()
 
-
-
     def update_real_time_visualization(self, network, data, step, initial_conditions):
         # Give positions to any new nodes without disturbing old ones
         self._update_positions_for_new_nodes(network)
@@ -319,6 +329,7 @@ def main():
     parser.add_argument("--switch_network", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
+    parser.add_argument("--curing_type", type=str, default='gradient')
     args = parser.parse_args()
 
     # Run Simulation
