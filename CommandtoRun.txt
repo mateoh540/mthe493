@@ -1,0 +1,22 @@
+Below is an exmaple command to run:
+
+python simulation.py --network_type "switch" --steps 10 --initial_nodes 5 --visualize 1
+
+New command: 
+
+python simulation.py --steps 1000 --visualize 1  --iterations 1 --initial_conditions [[7,5]]
+
+
+Parameters:
+network_type : Choose from Erdos-Renyi, Balarasi, and switch
+Steps: How many time steps do you want it to run for?
+initial_nodes: How many nodes to start the graph with
+visualize : 1 - live simulation, 0 - runs silently
+
+
+Libraries:
+pip install networkx matplotlib numpy
+
+
+To see the same output as what Mateo had as original code run:
+python simulation.py --network_type "erdos renyi" --steps 100 --initial_nodes 50 --visualize 1
