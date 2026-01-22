@@ -62,7 +62,7 @@ class Network:
     def __init__(self):
         self.nodes = {}
         self.graph = None
-        self.p_dominating = 0.5  # probability of dominating node
+        self.p_dominating = 0.7  # probability of dominating node
 
     # ---------- Initializers ----------
     def initialize_barabasi_albert(self, n, m, initial_conditions):
@@ -71,54 +71,76 @@ class Network:
         for nid in self.graph.nodes():
             self.nodes[nid] = Node(nid, delta_red=delta_red, delta_black=delta_black)
 
+        self.switch_network(10)
+        
+
     # ---------- Switching dynamics ----------
-    def switch_network(self, new_nodes=1):
+    def switch_network(self, new_nodes):
         start_idx = len(self.nodes)
+        dominating_balls = 1
+        isolated_balls = 10
         for i in range(new_nodes):
             new_id = start_idx + i
-            is_dominating = random.random() < self.p_dominating
-
-            if is_dominating:
-                # Dominating node – high red, connected to all
-                self.graph.add_node(new_id)
-                self.nodes[new_id] = Node(
-                    node_id=new_id,
-                    initial_red=10,
-                    initial_black=5,
-                    delta_red=5, 
-                    delta_black=5
-                )
-                # Connect to 70%
-                for existing in list(self.graph.nodes()):
-                    if existing != new_id:
-                        if random.random() < 0.5:
-                            self.graph.add_edge(new_id, existing)
-
-
+            # === Polya Process ===
+            if random.random() < (dominating_balls / (dominating_balls + isolated_balls)):
+                dominating_balls = dominating_balls + 1
+                node_type = 'dominating'
             else:
-                # Isolated node – dominantly black, no edges
-                self.graph.add_node(new_id)
-                self.nodes[new_id] = Node(
+                isolated_balls = isolated_balls + 1
+                node_type = 'isolated'
+            
+
+            existing_nodes = [n for n in self.graph.nodes()]
+            self.graph.add_node(new_id)
+ 
+            if node_type == 'dominating': #
+                #Red Biased 
+                if random.random() < 0.5:
+                    self.nodes[new_id] = Node(
+                        node_id=new_id,
+                        initial_red=10,
+                        initial_black=5,
+                        delta_red=7, 
+                        delta_black=5
+                    )
+                else: # Black Biased
+                    self.nodes[new_id] = Node(
                     node_id=new_id,
                     initial_red=5,
                     initial_black=10,
                     delta_red=5, 
+                    delta_black=7
+                )  
+                m = int(np.ceil(0.4*len(existing_nodes))) # Connect to 40% of nodes
+            else:# Neutral User
+
+                self.nodes[new_id] = Node(
+                    node_id=new_id,
+                    initial_red=5,
+                    initial_black=5,
+                    delta_red=5, 
                     delta_black=5
                 )
-                # 50% of connecting to 3 most popular nodes
-                degrees = dict(self.graph.degree())
-                degrees.pop(new_id, None)
-                top3 = sorted(degrees, key=degrees.get, reverse=True)[:3]
-                for node in top3:
-                    if random.random() < 0.5:
-                        self.graph.add_edge(new_id, node)
+                m = int(np.ceil(0.1*len(existing_nodes))) # Connect to 10% of Nodes
+        
+            # Choose nodes to connect to (preferential attachment)
+            chosen = set()
+            for _ in range(m):
+                candidates = [n for n in existing_nodes if n not in chosen]
+                degrees = {n: self.graph.degree(n) for n in candidates}
+                total_deg = sum(degrees.values())
 
-                # Add one black ball to every *existing* node (global truth effect)
-                # for existing_id, node in self.nodes.items():
-                #     if existing_id != new_id:
-                #         node.urn_black += 1
-
-                # print("Added one black ball to every other node (global correction)")
+                r = random.random() * total_deg
+                acc = 0.0
+                pick = candidates[-1]
+                for n in candidates:
+                    acc += degrees[n]
+                    if acc >= r:
+                        pick = n
+                        break
+            
+                chosen.add(pick)
+                self.graph.add_edge(new_id, pick)
 
     # ---------- Super-urn calculations ----------
     def get_super_urn_proportion(self, node_id):
@@ -171,7 +193,7 @@ class SimulationRunner:
     def __init__(self):
         pass
 
-    def run_simulation(self, visualize, switch_network, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
+    def run_simulation(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
     
         simulation_data = np.zeros((iterations, num_steps, 2))
         for i in range(iterations):
@@ -185,9 +207,6 @@ class SimulationRunner:
                     network.simulate_step()
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
-                    if switch_network:
-                        network.switch_network(new_nodes=1)
-                        self.pos = nx.spring_layout(network.graph, seed=42)
                     self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
 
                 plt.ioff()
@@ -199,8 +218,6 @@ class SimulationRunner:
                     network.apply_curing(curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
-                    if switch_network:
-                        network.switch_network(new_nodes=1)
 
         return simulation_data
     def setup_real_time_visualization(self, network, num_steps, initial_conditions):
@@ -261,20 +278,16 @@ class SimulationRunner:
 
     def _draw_network(self, network, initial_conditions):
         # Map proportion to hard colors
-        node_colors = [
-            'red' if n.get_proportion() >= 0.5 else 'black'
-            for n in network.nodes.values()
-        ]
 
         keep_limits = hasattr(self, "xlim") and hasattr(self, "ylim")
         if keep_limits:
             xlim, ylim = self.xlim, self.ylim
-
+        node_colors = self._get_node_colors(network)
         self.ax_net.clear()
         nx.draw_networkx(
             network.graph, pos=self.pos, ax=self.ax_net,
-            node_color=node_colors,
-            node_size=250, with_labels=True
+            node_color=node_colors, node_size=200,
+            cmap='coolwarm', vmin=0, vmax=1
         )
         self.ax_net.set_title("Network")
         self.ax_net.axis('off')
@@ -316,38 +329,44 @@ class SimulationRunner:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-
+    def _get_node_colors(self, network):
+        return [network.nodes[node_id].get_proportion() 
+                for node_id in network.graph.nodes()]
 
 # ==========================================================
 # Entry Point
 # ==========================================================
 def main():
     # Arguments
-    parser = argparse.ArgumentParser(description="Run Polya Switch-Network Simulation")
+    parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--visualize", type=int, default=1)
-    parser.add_argument("--switch_network", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     parser.add_argument("--curing_type", type=str, default='gradient')
     args = parser.parse_args()
 
-    # Run Simulation
+    # === Run Simulation === 
     total_simulation_data = []
     for i in range(len(args.initial_conditions)):
         sim = SimulationRunner()
         simulation_data = sim.run_simulation(
             visualize=bool(args.visualize),
-            switch_network = args.switch_network,
             num_steps = args.steps,
             iterations = args.iterations,
             initial_conditions = args.initial_conditions[i],
-            initial_nodes= 100 
+            initial_nodes= 100,
+            curing_type='gradient'
         )
         total_simulation_data.append(simulation_data)
 
+
+    # === Data ===
     data = np.array(total_simulation_data)  
     print(data)
+
+    # === Plotting Final Results
+
     # Plot
     # Calculate and plot averages
     plt.figure(figsize=(10, 6))
@@ -362,14 +381,14 @@ def main():
     plt.show()
 
     # Export all data
-    initial_conditions, iterations, steps, metric = data.shape
-    all_df = pd.DataFrame({
-        'initial_condition': np.repeat(range(initial_conditions), steps),
-        'iteration': np.repeat(range(iterations), steps),
-        'step': np.tile(range(steps), iterations),
-        'S_bar': data[:, :, 1].flatten()
-    })
-    all_df.to_csv('simulation_all_data.csv', index=False)
+    # initial_conditions, iterations, steps, metric = data.shape
+    # all_df = pd.DataFrame({
+    #     'initial_condition': np.repeat(range(initial_conditions), steps),
+    #     'iteration': np.repeat(range(iterations), steps),
+    #     'step': np.tile(range(steps), iterations),
+    #     'S_bar': data[:, :, 1].flatten()
+    # })
+    # all_df.to_csv('simulation_all_data.csv', index=False)
 
 
 if __name__ == "__main__":
