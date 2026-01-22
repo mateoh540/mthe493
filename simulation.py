@@ -337,12 +337,13 @@ def main():
     for i in range(len(args.initial_conditions)):
         sim = SimulationRunner()
         simulation_data = sim.run_simulation(
-            visualize=bool(args.visualize),
-            switch_network = args.switch_network,
-            num_steps = args.steps,
-            iterations = args.iterations,
-            initial_conditions = args.initial_conditions[i],
-            initial_nodes= 100 
+           visualize=bool(args.visualize),
+            switch_network=args.switch_network,
+            num_steps=args.steps,
+         iterations=args.iterations,
+            initial_conditions=args.initial_conditions[i],
+            initial_nodes=100,
+            curing_type=args.curing_type
         )
         total_simulation_data.append(simulation_data)
 
