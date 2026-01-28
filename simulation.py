@@ -24,36 +24,51 @@ class Node:
         self.node_id = node_id
         self.urn_red = initial_red
         self.urn_black = initial_black
-        self.delta_red = delta_red
-        self.delta_black = delta_black
+        self.delta_red = float(delta_red)
+        self.delta_black = float(delta_black)  # default / fallback
         self.memory_size = memory_size
+
+        # Store (draw, delta_red_used, delta_black_used) for finite-memory undo
         self.draw_queue = deque()
 
     def get_proportion(self):
-        """Return the proportion of red balls."""
-        return self.urn_red / (self.urn_red + self.urn_black)
+        total = self.urn_red + self.urn_black
+        return 0.0 if total <= 0 else self.urn_red / total
 
-    def update(self, draw_result):
-        """Update urn content using finite memory."""
-        self.draw_queue.append(draw_result)
-        if len(self.draw_queue) > self.memory_size:
-            old = self.draw_queue.popleft()
-        else:
-            old = None
+    def update(self, draw_result: int, delta_black_step: float | None = None):
+        """
+        Update urn content using finite memory.
+        draw_result: 1 (red) or 0 (black)
+        delta_black_step: curing amount used *this step* if draw_result == 0
+        """
+        if delta_black_step is None:
+            delta_black_step = self.delta_black
+        delta_black_step = float(max(0.0, delta_black_step))
 
+        # Push new draw with the actual deltas used
+        self.draw_queue.append((draw_result, self.delta_red, delta_black_step))
+
+        # Pop old if exceeding memory
+        old = self.draw_queue.popleft() if len(self.draw_queue) > self.memory_size else None
+
+        # Apply current step reinforcement
         if draw_result == 1:
             self.urn_red += self.delta_red
         else:
-            self.urn_black += self.delta_black
+            self.urn_black += delta_black_step
 
+        # Undo the popped old reinforcement
         if old is not None:
-            if old == 1:
-                self.urn_red -= self.delta_red
+            old_draw, old_dr, old_db = old
+            if old_draw == 1:
+                self.urn_red -= old_dr
             else:
-                self.urn_black -= self.delta_black
+                self.urn_black -= old_db
 
-        self.urn_red = max(0, self.urn_red)
-        self.urn_black = max(0, self.urn_black)
+        self.urn_red = max(0.0, self.urn_red)
+        self.urn_black = max(0.0, self.urn_black)
+
+    
 
 # ==========================================================
 # Network class (static + switched)
@@ -63,6 +78,177 @@ class Network:
         self.nodes = {}
         self.graph = None
         self.p_dominating = 0.7  # probability of dominating node
+
+        # Budget for curing per step (set later)
+        self.budget_B = None
+
+    def set_budget(self, B: float):
+        self.budget_B = float(B)
+
+    def _neighbor_closed(self, i):
+        """Closed neighborhood N_i^+ = {i} U neighbors(i)."""
+        return [i] + list(self.graph.neighbors(i))
+
+    def _compute_p(self):
+        """Current p_i = S_{i,n-1} for all nodes."""
+        return {i: self.get_super_urn_proportion(i) for i in self.nodes.keys()}
+
+    def _expected_red_black_after_step(self, p, x):
+        """
+        Compute expected individual urn contents AFTER this step,
+        using draw probabilities p_i and curing allocation x_i.
+
+        Returns:
+          red_exp[i], black_exp[i]
+        """
+        red_exp = {}
+        black_exp = {}
+
+        for i, node in self.nodes.items():
+            # Determine whether a removal will happen (finite memory)
+            will_pop = (len(node.draw_queue) >= node.memory_size)
+            popped = node.draw_queue[0] if will_pop else None
+
+            # Expected add (current step)
+            add_red = node.delta_red * p[i]
+            add_black = x[i] * (1.0 - p[i])
+
+            # Deterministic remove (because popped draw is known)
+            rem_red = 0.0
+            rem_black = 0.0
+            if popped is not None:
+                old_draw, old_dr, old_db = popped
+                if old_draw == 1:
+                    rem_red = float(old_dr)
+                else:
+                    rem_black = float(old_db)
+
+            red_exp[i] = max(0.0, node.urn_red + add_red - rem_red)
+            black_exp[i] = max(0.0, node.urn_black + add_black - rem_black)
+
+        return red_exp, black_exp
+
+    def _objective_expected_Sbar(self, p, x):
+        """
+        f(x) = expected network exposure after the step, approximated by
+        plugging in expected urn contents.
+        """
+        red_exp, black_exp = self._expected_red_black_after_step(p, x)
+
+        total = 0.0
+        for i in self.nodes.keys():
+            neigh = self._neighbor_closed(i)
+            num = sum(red_exp[j] for j in neigh)
+            den = sum(red_exp[j] + black_exp[j] for j in neigh)
+            total += (num / den) if den > 0 else 0.0
+
+        return total / len(self.nodes)
+
+    def _gradient_expected_Sbar(self, p, x):
+        """
+        Analytic gradient of the approximation.
+
+        Each super-urn term looks like num_i / den_i where den_i depends linearly
+        on x_j through (1-p_j)*x_j for j in N_i^+.
+
+        df/dx_k = -(1/N) * sum_{i: k in N_i^+} num_i * (1-p_k) / den_i^2
+        """
+        red_exp, black_exp = self._expected_red_black_after_step(p, x)
+
+        # Precompute num_i and den_i for each node i
+        num = {}
+        den = {}
+        closed_neigh = {}
+        for i in self.nodes.keys():
+            neigh = self._neighbor_closed(i)
+            closed_neigh[i] = neigh
+            num_i = sum(red_exp[j] for j in neigh)
+            den_i = sum(red_exp[j] + black_exp[j] for j in neigh)
+            num[i] = num_i
+            den[i] = den_i
+
+        N = len(self.nodes)
+        grad = {k: 0.0 for k in self.nodes.keys()}
+
+        # For each k, accumulate contributions from i where k in N_i^+
+        # Efficient way: loop i then update all k in its neighborhood
+        for i in self.nodes.keys():
+            den_i = den[i]
+            if den_i <= 0:
+                continue
+            coeff = - (num[i] / (den_i * den_i)) / N  # common factor
+            for k in closed_neigh[i]:
+                grad[k] += coeff * (1.0 - p[k])
+
+        return grad
+
+    def _golden_section_search(self, p, x, v, iters=25):
+        """
+        Minimize f((1-a)x + a v) over a in [0,1] via golden-section search.
+        """
+        phi = (1 + 5 ** 0.5) / 2
+        lo, hi = 0.0, 1.0
+
+        def mix(a):
+            return {i: (1 - a) * x[i] + a * v[i] for i in x.keys()}
+
+        c = hi - (hi - lo) / phi
+        d = lo + (hi - lo) / phi
+        fc = self._objective_expected_Sbar(p, mix(c))
+        fd = self._objective_expected_Sbar(p, mix(d))
+
+        for _ in range(iters):
+            if fc < fd:
+                hi = d
+                d = c
+                fd = fc
+                c = hi - (hi - lo) / phi
+                fc = self._objective_expected_Sbar(p, mix(c))
+            else:
+                lo = c
+                c = d
+                fc = fd
+                d = lo + (hi - lo) / phi
+                fd = self._objective_expected_Sbar(p, mix(d))
+
+        return 0.5 * (lo + hi)
+
+    def compute_curing_gradient_simplex(self, max_iters=10):
+        """
+        Compute curing allocation x (Delta_b per node) on simplex sum x = B, x>=0
+        using simplex-constrained gradient descent (Algorithm-2 style).
+        """
+        if self.budget_B is None:
+            # reasonable default: same order as total delta_red
+            self.budget_B = float(sum(n.delta_red for n in self.nodes.values()))
+
+        B = self.budget_B
+        node_ids = list(self.nodes.keys())
+
+        # Current infection probabilities p_i = S_{i,n-1}
+        p = self._compute_p()
+
+        # Start from uniform allocation
+        x = {i: B / len(node_ids) for i in node_ids}
+
+        for _ in range(max_iters):
+            grad = self._gradient_expected_Sbar(p, x)
+
+            # Pick coordinate with most negative partial (steepest descent)
+            i_star = min(grad, key=lambda k: grad[k])
+
+            # Vertex allocation: all budget on i_star
+            v = {i: 0.0 for i in node_ids}
+            v[i_star] = B
+
+            # Line search alpha in [0,1]
+            alpha = self._golden_section_search(p, x, v)
+
+            # Update
+            x = {i: (1 - alpha) * x[i] + alpha * v[i] for i in node_ids}
+
+        return x
+
 
     # ---------- Initializers ----------
     def initialize_barabasi_albert(self, n, m, initial_conditions):
@@ -161,14 +347,67 @@ class Network:
         return U_bar, S_bar
 
     # ---------- Simulation step ----------
-    def simulate_step(self):
-        draws = {}
-        proportions = {i: self.get_super_urn_proportion(i)
-                       for i in self.nodes.keys()}
-        for i, p in proportions.items():
-            draws[i] = 1 if np.random.random() < p else 0
+    def simulate_step(self, curing_strategy: str = "none"):
+        """
+        One time-step of the network Polya process with optional curing.
+
+        curing_strategy:
+        - "none":    no extra curing this step (delta_black_step = 0 for everyone)
+        - "uniform": spread the budget B evenly across all nodes (sum x_i = B)
+        - "gradient":choose x on the simplex (sum x_i = B) to reduce expected next exposure
+
+        IMPORTANT:
+        - Step 1 decides x_i (curing amounts) for THIS step.
+        - Step 2 draws using CURRENT super-urn proportions (curing doesn't affect draws until next step).
+        - Step 3 updates urns using x_i only when a node draws black.
+        """
+        node_ids = list(self.nodes.keys())
+        N = len(node_ids)
+        if N == 0:
+            return
+
+        # ----------------------------
+        # 1) Choose curing allocation x
+        # ----------------------------
+        # If strategy needs a budget, ensure it exists.
+        if curing_strategy in ("uniform", "gradient"):
+            if self.budget_B is None:
+                raise ValueError(
+                    "budget_B is not set. Call network.set_budget(B) after initialization."
+                )
+            B = float(self.budget_B)
+
+        if curing_strategy == "none":
+            # Truly no curing this step
+            x = {i: 0.0 for i in node_ids}
+
+        elif curing_strategy == "uniform":
+            # Budget-feasible baseline: spread B evenly
+            x = {i: B / N for i in node_ids}
+
+        elif curing_strategy == "gradient":
+            # Budget-feasible optimization on simplex
+            x = self.compute_curing_gradient_simplex(max_iters=10)
+
+        else:
+            raise ValueError(
+                f"Unknown curing_strategy='{curing_strategy}'. "
+                "Use 'none', 'uniform', or 'gradient'."
+            )
+
+        # ----------------------------
+        # 2) Draw from current super-urns
+        # ----------------------------
+        proportions = {i: self.get_super_urn_proportion(i) for i in node_ids}
+        draws = {i: 1 if np.random.random() < proportions[i] else 0 for i in node_ids}
+
+        # ----------------------------
+        # 3) Update urns using this step's curing x_i (only if draw is black)
+        # ----------------------------
         for i, d in draws.items():
-            self.nodes[i].update(d)
+            self.nodes[i].update(d, delta_black_step=x[i])
+
+
 
 
     def apply_curing(self, curing_strategy):
@@ -200,11 +439,14 @@ class SimulationRunner:
             network = Network()
             m = 1
             network.initialize_barabasi_albert(n=initial_nodes, m=m, initial_conditions=initial_conditions)       
-            
+            network.set_budget(len(network.nodes) * initial_conditions[1])
+
+
+
             if visualize:
                 self.setup_real_time_visualization(network, num_steps, initial_conditions)
                 for step in range(num_steps):
-                    network.simulate_step()
+                    network.simulate_step(curing_strategy=curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
                     self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
@@ -214,8 +456,7 @@ class SimulationRunner:
                 plt.close(self.fig)
             else:
                 for step in range(num_steps):
-                    network.simulate_step()
-                    network.apply_curing(curing_type)
+                    network.simulate_step(curing_strategy=curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
 
@@ -356,7 +597,7 @@ def main():
             iterations = args.iterations,
             initial_conditions = args.initial_conditions[i],
             initial_nodes= 100,
-            curing_type='gradient'
+            curing_type=args.curing_type
         )
         total_simulation_data.append(simulation_data)
 
