@@ -6,6 +6,9 @@ New command:
 
 python simulation.py --steps 1000 --visualize 1  --iterations 1 --initial_conditions [[7,5]]
 
+Command to run for using curing:
+python simulation.py --steps 300 --visualize 1 --iterations 1 --curing_type gradient
+
 
 Parameters:
 network_type : Choose from Erdos-Renyi, Balarasi, and switch
