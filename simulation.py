@@ -13,15 +13,19 @@ from matplotlib.colors import LinearSegmentedColormap
 
 RED_BLACK_CMAP = LinearSegmentedColormap.from_list("red_black", ["black", "red"])
 
-
+NEWS_W_OUT = 2
+NEWS_W_IN  = 0
+INFLUENCER_W_OUT = 2
+USER_W_OUT   = 1
 
 # ==========================================================
 # Node class
 # ==========================================================
 class Node:
-    def __init__(self, node_id, initial_red=5, initial_black=5,
+    def __init__(self, node_id, node_type, initial_red=5, initial_black=5,
                  delta_red=10, delta_black=5, memory_size=10):
         self.node_id = node_id
+        self.node_type = node_type
         self.urn_red = initial_red
         self.urn_black = initial_black
         self.delta_red = delta_red
@@ -61,15 +65,30 @@ class Node:
 class Network:
     def __init__(self):
         self.nodes = {}
-        self.graph = None
+        self.graph = nx.DiGraph()
         self.p_dominating = 0.7  # probability of dominating node
 
     # ---------- Initializers ----------
     def initialize_barabasi_albert(self, n, m, initial_conditions):
-        self.graph = nx.barabasi_albert_graph(n, m)
+        ba_graph = nx.barabasi_albert_graph(n, m)
+        
+        centrality = nx.degree_centrality(ba_graph)
+        top_3 = sorted(centrality, key=centrality.get, reverse=True)[:3]
+        self.news_nodes = set(top_3)
+
+        self.graph = nx.DiGraph()
         delta_red, delta_black = initial_conditions
-        for nid in self.graph.nodes():
-            self.nodes[nid] = Node(nid, delta_red=delta_red, delta_black=delta_black)
+        for nid in ba_graph.nodes():
+            if nid in self.news_nodes:
+                node_type = 'news'
+            else:
+                node_type = 'user'
+            self.graph.add_node(nid)
+            self.nodes[nid] = Node(nid, node_type=node_type, delta_red=delta_red, delta_black=delta_black)
+
+        for u, v in ba_graph.edges():
+            self.graph.add_edge(u, v, weight=self.edge_weight(u, v))
+            self.graph.add_edge(v, u, weight=self.edge_weight(v, u))
 
         self.switch_network(10)
         
@@ -90,7 +109,7 @@ class Network:
                 node_type = 'isolated'
             
 
-            existing_nodes = [n for n in self.graph.nodes()]
+            existing_nodes = list(self.graph.nodes())
             self.graph.add_node(new_id)
  
             if node_type == 'dominating': #
@@ -98,6 +117,7 @@ class Network:
                 if random.random() < 0.5:
                     self.nodes[new_id] = Node(
                         node_id=new_id,
+                        node_type='influencer',
                         initial_red=10,
                         initial_black=5,
                         delta_red=7, 
@@ -106,6 +126,7 @@ class Network:
                 else: # Black Biased
                     self.nodes[new_id] = Node(
                     node_id=new_id,
+                    node_type='influencer',
                     initial_red=5,
                     initial_black=10,
                     delta_red=5, 
@@ -116,6 +137,7 @@ class Network:
 
                 self.nodes[new_id] = Node(
                     node_id=new_id,
+                    node_type='user',
                     initial_red=5,
                     initial_black=5,
                     delta_red=5, 
@@ -140,33 +162,33 @@ class Network:
                         break
             
                 chosen.add(pick)
-                self.graph.add_edge(new_id, pick)
+               
+                self.graph.add_edge(new_id, pick, weight=self.edge_weight(new_id, pick))
+                self.graph.add_edge(pick, new_id, weight=self.edge_weight(pick, new_id))
 
     # ---------- Super-urn calculations ----------
     def get_super_urn_proportion(self, node_id):
         node = self.nodes[node_id]
-        neighbors = list(self.graph.neighbors(node_id))
         total_red = node.urn_red
         total_balls = node.urn_red + node.urn_black
-        for nb in neighbors:
+        for nb in self.graph.predecessors(node_id):
+            weight = self.graph[node_id][nb]['weight']
             neighbor = self.nodes[nb]
-            total_red += neighbor.urn_red
-            total_balls += neighbor.urn_red + neighbor.urn_black
+            total_red += neighbor.urn_red * weight
+            total_balls += (neighbor.urn_red + neighbor.urn_black) * weight
         return total_red / total_balls
 
     def get_network_metrics(self):
         U_bar = np.mean([n.get_proportion() for n in self.nodes.values()])
-        S_bar = np.mean([self.get_super_urn_proportion(i)
-                         for i in self.nodes.keys()])
+        S_bar = np.mean(list(self.cached_super_urn.values()))
         return U_bar, S_bar
 
     # ---------- Simulation step ----------
     def simulate_step(self):
-        draws = {}
-        proportions = {i: self.get_super_urn_proportion(i)
-                       for i in self.nodes.keys()}
-        for i, p in proportions.items():
-            draws[i] = 1 if np.random.random() < p else 0
+        self.cached_super_urn = {i: self.get_super_urn_proportion(i)
+                                 for i in self.nodes.keys()}
+        draws = {i: 1 if np.random.random() < p else 0
+                 for i, p in self.cached_super_urn.items()}
         for i, d in draws.items():
             self.nodes[i].update(d)
 
@@ -186,6 +208,18 @@ class Network:
                 self.graph
                 self.get_super_urn_proportion(1)
 
+    def edge_weight(self, u, v):
+        if self.nodes[v].node_type == 'news':
+            return NEWS_W_IN
+
+        src_type = self.nodes[u].node_type
+        if src_type == 'news':
+            return NEWS_W_OUT
+        elif src_type == 'influencer':
+            return INFLUENCER_W_OUT
+        else:
+            return USER_W_OUT
+
 # ==========================================================
 # Simulation Runner with visualization
 # ==========================================================
@@ -194,7 +228,7 @@ class SimulationRunner:
         pass
 
     def run_simulation(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
-    
+        redraw_every = 10
         simulation_data = np.zeros((iterations, num_steps, 2))
         for i in range(iterations):
             network = Network()
@@ -203,15 +237,21 @@ class SimulationRunner:
             
             if visualize:
                 self.setup_real_time_visualization(network, num_steps, initial_conditions)
-                for step in range(num_steps):
-                    network.simulate_step()
-                    U_bar, S_bar = network.get_network_metrics()
-                    simulation_data[i, step] = [U_bar, S_bar]
-                    self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
+                try:
+                    for step in range(num_steps):
+                        if not plt.fignum_exists(self.fig.number): #Checks if user closed the figure
+                            print("Figure closed by user, stopping simulation early.")
+                            break
 
-                plt.ioff()
-                plt.show()
-                plt.close(self.fig)
+                        network.simulate_step()
+                        U_bar, S_bar = network.get_network_metrics()
+                        simulation_data[i, step] = [U_bar, S_bar]
+                        if step % redraw_every == 0 or step == num_steps - 1:
+                            self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
+
+                finally: #Closes figure
+                    plt.ioff()
+                    plt.close('all')
             else:
                 for step in range(num_steps):
                     network.simulate_step()
@@ -226,8 +266,11 @@ class SimulationRunner:
             1, 2, figsize=(14, 6), gridspec_kw={'width_ratios': [2, 1]}
         )
 
-        # Initial layout computed ONCE
-        self.pos = nx.spring_layout(network.graph, seed=42)
+        degrees = dict(network.graph.degree())
+        self.pos = nx.spring_layout(network.graph, seed=42, k=3.0, iterations=100, weight=None)
+        for n in self.pos:
+            scale = np.log1p(degrees[n])
+            self.pos[n] = self.pos[n] * scale
 
         # Draw once to fix initial limits
         self._draw_network(network, initial_conditions)
