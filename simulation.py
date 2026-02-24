@@ -185,7 +185,63 @@ class Network:
                 self.nodes
                 self.graph
                 self.get_super_urn_proportion(1)
+            case "centrality":
+                # --- baseline misinfo injection (uniform, every timestep) ---
+                for nid in self.graph.nodes():
+                    self.nodes[nid].urn_red += 5
+                # --- curing allocation (black balls) ---
+                scores = nx.degree_centrality(self.graph)
+                N = self.graph.number_of_nodes()
+                budget_multiplier = 5
+                B = int(budget_multiplier * N) #total budget
 
+                candidates = list(self.graph.nodes())
+
+                #sort candidates by cenrality scores
+                candidates.sort(
+                    key=lambda nid: scores.get(nid, 0.0),
+                    reverse=True
+                )
+
+                central_priority = 2 #weight representing how strongly centrality is prioritized
+                proportion_priority = 2 #weight representing how strongly proportion of misinformed information is prioritized
+
+                node_weight = {}
+
+                for nid in candidates:
+                    centrality_score = max(scores.get(nid, 0.0), 0.0)
+                    proportion_score = max(self.nodes[nid].get_proportion(), 0.0)
+
+                # store each node's weight by node id
+                    node_weight[nid] = (
+                        (centrality_score ** central_priority)
+                        * (proportion_score ** proportion_priority)
+                    )
+
+                # sum all weights (scalar)
+                total_weight = float(sum(node_weight.values()))
+
+                allocation = {}
+                used = 0
+
+                for nid, w in node_weight.items():
+                    balls = int(np.floor(B * (w / total_weight)))
+                    allocation[nid] = balls
+                    used += balls
+
+                leftover = B - used
+                i = 0
+
+                while leftover > 0:
+                    nid = candidates[i]
+                    allocation[nid] += 1
+                    leftover -= 1
+                    i = (i + 1) % len(candidates)
+
+                for nid, balls in allocation.items():
+                    if balls > 0:
+                        self.nodes[nid].urn_black += balls
+             
 # ==========================================================
 # Simulation Runner with visualization
 # ==========================================================
@@ -205,6 +261,9 @@ class SimulationRunner:
                 self.setup_real_time_visualization(network, num_steps, initial_conditions)
                 for step in range(num_steps):
                     network.simulate_step()
+                    # Only start curing once the network reaches 200 nodes
+                    if curing_type == "centrality" and len(network.nodes) >= 200:
+                        network.apply_curing("centrality")
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
                     self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
@@ -344,6 +403,8 @@ def main():
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     parser.add_argument("--curing_type", type=str, default='gradient')
+    parser.add_argument("--cure_start_nodes", type=int, default=200)
+
     args = parser.parse_args()
 
     # === Run Simulation === 
@@ -351,22 +412,12 @@ def main():
     for i in range(len(args.initial_conditions)):
         sim = SimulationRunner()
         simulation_data = sim.run_simulation(
-<<<<<<< HEAD
-           visualize=bool(args.visualize),
-            switch_network=args.switch_network,
-            num_steps=args.steps,
-         iterations=args.iterations,
-            initial_conditions=args.initial_conditions[i],
-            initial_nodes=100,
-            curing_type=args.curing_type
-=======
             visualize=bool(args.visualize),
             num_steps = args.steps,
             iterations = args.iterations,
             initial_conditions = args.initial_conditions[i],
             initial_nodes= 100,
-            curing_type='gradient'
->>>>>>> origin/main
+            curing_type=args.curing_type,
         )
         total_simulation_data.append(simulation_data)
 
