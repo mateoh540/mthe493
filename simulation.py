@@ -194,19 +194,51 @@ class Network:
 
 
     def apply_curing(self, curing_strategy):
+        """
+        Apply a curing strategy to the network.
+        
+        Parameters
+        ----------
+        curing_strategy : str
+            Strategy name: "none", "gradient", "heuristic", or "supermartingale".
+        
+        Returns
+        -------
+        float
+            Extra curing cost above baseline at this step.
+            For "none" (baseline), returns 0.
+        """
         match curing_strategy:
+            case "none":
+                # Baseline: no curing
+                return 0.0
             case "gradient":
+                # Placeholder: gradient descent strategy
+                # TODO: Implement actual gradient descent curing
+                extra_cost = 0.0
                 self.nodes
                 self.graph
                 self.get_super_urn_proportion(1)
+                return extra_cost
             case "heuristic":
+                # Placeholder: heuristic strategy (Lindsay branch)
+                # TODO: Implement actual heuristic curing
+                extra_cost = 0.0
                 self.nodes
                 self.graph
                 self.get_super_urn_proportion(1)
+                return extra_cost
             case "supermartingale":
+                # Placeholder: supermartingale strategy
+                # TODO: Implement actual supermartingale curing
+                extra_cost = 0.0
                 self.nodes
                 self.graph
                 self.get_super_urn_proportion(1)
+                return extra_cost
+            case _:
+                # Unknown strategy defaults to "none"
+                return 0.0
 
     def edge_weight(self, u, v):
         if self.nodes[v].node_type == 'news':
@@ -228,8 +260,37 @@ class SimulationRunner:
         pass
 
     def run_simulation(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
+        """
+        Run simulation for a given curing strategy.
+        
+        Parameters
+        ----------
+        visualize : bool
+            Whether to visualize in real-time.
+        num_steps : int
+            Number of simulation steps.
+        iterations : int
+            Number of independent runs.
+        initial_conditions : tuple
+            (delta_red, delta_black) for Polya urns.
+        initial_nodes : int
+            Number of initial nodes in BA network.
+        curing_type : str
+            Curing strategy: "none", "gradient", "heuristic", or "supermartingale".
+        
+        Returns
+        -------
+        tuple
+            (simulation_data, curing_costs)
+            - simulation_data: np.ndarray of shape (iterations, num_steps, 2)
+              with U̅(n) and S̅(n) time series.
+            - curing_costs: np.ndarray of shape (iterations, num_steps)
+              with extra curing cost at each step.
+        """
         redraw_every = 10
         simulation_data = np.zeros((iterations, num_steps, 2))
+        curing_costs = np.zeros((iterations, num_steps))
+        
         for i in range(iterations):
             network = Network()
             m = 1
@@ -246,6 +307,8 @@ class SimulationRunner:
                         network.simulate_step()
                         U_bar, S_bar = network.get_network_metrics()
                         simulation_data[i, step] = [U_bar, S_bar]
+                        # Visualize-only runs don't apply curing; track 0 cost
+                        curing_costs[i, step] = 0.0
                         if step % redraw_every == 0 or step == num_steps - 1:
                             self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
 
@@ -255,11 +318,12 @@ class SimulationRunner:
             else:
                 for step in range(num_steps):
                     network.simulate_step()
-                    network.apply_curing(curing_type)
+                    extra_cost = network.apply_curing(curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
+                    curing_costs[i, step] = extra_cost
 
-        return simulation_data
+        return simulation_data, curing_costs
     def setup_real_time_visualization(self, network, num_steps, initial_conditions):
         plt.ion()
         self.fig, (self.ax_net, self.ax_met) = plt.subplots(
@@ -380,50 +444,82 @@ class SimulationRunner:
 # Entry Point
 # ==========================================================
 def main():
+    """
+    Main entry point for Polya network simulation with evaluation.
+    
+    Runs simulations for specified curing strategies and computes
+    evaluation metrics using the evaluation.py module.
+    """
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--visualize", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
-    parser.add_argument("--curing_type", type=str, default='gradient')
+    parser.add_argument("--curing_types", type=str, nargs='+', default=['none', 'gradient'])
     args = parser.parse_args()
 
-    # === Run Simulation === 
+    # === Run Simulation for Each Curing Type ===
+    # Note: main() now returns (simulation_data, curing_costs) tuple
     total_simulation_data = []
-    for i in range(len(args.initial_conditions)):
+    total_curing_costs = {}
+    
+    for curing_type in args.curing_types:
+        print(f"\nRunning simulation with curing strategy: {curing_type}")
         sim = SimulationRunner()
-        simulation_data = sim.run_simulation(
+        simulation_data, curing_costs = sim.run_simulation(
             visualize=bool(args.visualize),
-            num_steps = args.steps,
-            iterations = args.iterations,
-            initial_conditions = args.initial_conditions[i],
-            initial_nodes= 100,
-            curing_type='gradient'
+            num_steps=args.steps,
+            iterations=args.iterations,
+            initial_conditions=args.initial_conditions[0],
+            initial_nodes=100,
+            curing_type=curing_type
         )
         total_simulation_data.append(simulation_data)
+        total_curing_costs[curing_type] = curing_costs
 
+    # === Evaluate Metrics (Optional) ===
+    try:
+        from evaluation import run_evaluation_pipeline, summarize_runs, format_metrics_table
+        
+        # Use first initial condition for evaluation
+        simulation_data = total_simulation_data[0]
+        
+        results = run_evaluation_pipeline(
+            simulation_data=simulation_data,
+            curing_costs=total_curing_costs,
+            alpha=0.10,
+            condition_name="BA_baseline"
+        )
+        
+        print("\n" + "="*60)
+        print("EVALUATION METRICS")
+        print("="*60)
+        print(format_metrics_table(results))
+        
+    except ImportError:
+        print("\nWarning: evaluation module not found. Skipping metrics evaluation.")
 
     # === Data ===
     data = np.array(total_simulation_data)  
-    print(data)
 
-    # === Plotting Final Results
-
+    # === Plotting Final Results ===
     # Plot
-    # Calculate and plot averages
-    plt.figure(figsize=(10, 6))
-    for i in range(len(args.initial_conditions)):
-        avg_S = np.mean(data[i, :, :, 1], axis=0)
-        avg_S = np.insert(avg_S, 0, 0.5)
-        plt.plot(avg_S, label=f'S̄ₙ for Initial Conditions {args.initial_conditions[i]}', linewidth=2)
+    # Calculate and plot averages for each curing type
+    plt.figure(figsize=(12, 6))
+    for idx, curing_type in enumerate(args.curing_types):
+        avg_S = np.mean(data[idx, :, :, 1], axis=0)
+        plt.plot(avg_S, label=f'S̄(n) - {curing_type}', linewidth=2)
+    
     plt.xlabel('Time Steps')
-    plt.ylabel('Proportion')
+    plt.ylabel('Mean Exposure S̄(n)')
+    plt.title('Network Exposure Over Time by Curing Strategy')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.tight_layout()
     plt.show()
 
-    # Export all data
+    # Export all data (optional)
     # initial_conditions, iterations, steps, metric = data.shape
     # all_df = pd.DataFrame({
     #     'initial_condition': np.repeat(range(initial_conditions), steps),
