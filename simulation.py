@@ -56,7 +56,7 @@ class Node:
         self.urn_black = max(0, self.urn_black)
 
 # ==========================================================
-# Network class (static + switched)
+# Network class
 # ==========================================================
 class Network:
     def __init__(self):
