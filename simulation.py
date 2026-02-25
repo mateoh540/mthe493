@@ -8,6 +8,7 @@ import argparse
 import pandas as pd
 import datetime
 import json
+from approximate_dp import budget_plan
 
 from matplotlib.colors import LinearSegmentedColormap
 
@@ -23,7 +24,7 @@ USER_W_OUT   = 1
 # ==========================================================
 class Node:
     def __init__(self, node_id, node_type, initial_red=5, initial_black=5,
-                 delta_red=10, delta_black=5, memory_size=10):
+                 delta_red=5, delta_black=5, memory_size=10):
         self.node_id = node_id
         self.node_type = node_type
         self.urn_red = initial_red
@@ -81,7 +82,8 @@ class Network:
     def __init__(self):
         self.nodes = {}
         self.graph = nx.DiGraph()
-        self.p_dominating = 0.7  # probability of dominating node
+        self.p_dominating = 0.8  
+        self.cached_super_urn = {} 
 
         # Budget for curing per step (set later)
         self.budget_B = None
@@ -306,7 +308,7 @@ class Network:
                         node_type='influencer',
                         initial_red=10,
                         initial_black=5,
-                        delta_red=7, 
+                        delta_red=5, 
                         delta_black=5
                     )
                 else: # Black Biased
@@ -316,7 +318,7 @@ class Network:
                     initial_red=5,
                     initial_black=10,
                     delta_red=5, 
-                    delta_black=7
+                    delta_black=5
                 )  
                 m = int(np.ceil(0.4*len(existing_nodes))) # Connect to 40% of nodes
             else:# Neutral User
@@ -366,15 +368,15 @@ class Network:
 
     def get_network_metrics(self):
         U_bar = np.mean([n.get_proportion() for n in self.nodes.values()])
-        S_bar = np.mean(list(self.cached_super_urn.values()))
+        S_bar = np.mean([self.get_super_urn_proportion(i) for i in self.nodes.keys()])
         return U_bar, S_bar
 
     # ---------- Simulation step ----------
-    def simulate_step(self):
-        self.cached_super_urn = {i: self.get_super_urn_proportion(i)
-                                 for i in self.nodes.keys()}
-        draws = {i: 1 if np.random.random() < p else 0
-                 for i, p in self.cached_super_urn.items()}
+    # def simulate_step(self):
+    #     self.cached_super_urn = {i: self.get_super_urn_proportion(i)
+    #                              for i in self.nodes.keys()}
+    #     draws = {i: 1 if np.random.random() < p else 0
+    #              for i, p in self.cached_super_urn.items()}
     def simulate_step(self, curing_strategy: str = "none"):
         """
         One time-step of the network Polya process with optional curing.
@@ -427,6 +429,7 @@ class Network:
         # 2) Draw from current super-urns
         # ----------------------------
         proportions = {i: self.get_super_urn_proportion(i) for i in node_ids}
+        self.cached_super_urn = proportions
         draws = {i: 1 if np.random.random() < proportions[i] else 0 for i in node_ids}
 
         # ----------------------------
@@ -435,23 +438,6 @@ class Network:
         for i, d in draws.items():
             self.nodes[i].update(d, delta_black_step=x[i])
 
-
-
-
-    def apply_curing(self, curing_strategy):
-        match curing_strategy:
-            case "gradient":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
-            case "heuristic":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
-            case "supermartingale":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
 
     def edge_weight(self, u, v):
         if self.nodes[v].node_type == 'news':
@@ -469,48 +455,87 @@ class Network:
 # Simulation Runner with visualization
 # ==========================================================
 class SimulationRunner:
-    def __init__(self):
-        pass
+    def __init__(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type, horizon):
+        self.visualize = visualize
+        self.num_steps = num_steps
+        self.iterations = iterations
+        self.initial_conditions = initial_conditions
+        self.initial_nodes = initial_nodes
+        self.curing_type = curing_type
+        self.horizon = horizon
 
-    def run_simulation(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
+    def run_simulation(self):
         redraw_every = 10
-        simulation_data = np.zeros((iterations, num_steps, 2))
-        for i in range(iterations):
+        simulation_data = np.zeros((self.iterations, self.num_steps, 2))
+        plan = []
+        plan_idx = 0
+
+        for i in range(self.iterations):
+            # Set Seed
+            seed = 123 + i  # i = iteration
+            random.seed(seed)
+            np.random.seed(seed)
+            # Create Network
             network = Network()
             m = 1
-            network.initialize_barabasi_albert(n=initial_nodes, m=m, initial_conditions=initial_conditions)       
-            network.set_budget(len(network.nodes) * initial_conditions[1])
+            network.initialize_barabasi_albert(n=self.initial_nodes, m=m, initial_conditions=self.initial_conditions)  #Initialize the Graph
+            # Calculate Budget
+            Budget = len(network.nodes) * self.initial_conditions[1]
+
+            # Run the Simulation
+            if self.visualize:
+                self.setup_real_time_visualization(network, self.num_steps, self.initial_conditions)
+
+            for step in range(self.num_steps):
+                if self.visualize and not plt.fignum_exists(self.fig.number): #Checks if user closed the figure
+                    print("Figure closed by user, stopping simulation early.")
+                    break
+
+                # Set Budget
+                if self.horizon <= 1:
+                    network.set_budget(Budget)
+                else:
+                    B_total = self.horizon * Budget
+
+                    # replan at block boundaries OR if plan is empty/exhausted
+                    if (step % self.horizon == 0) or (plan_idx >= len(plan)):
+                        plan_idx = 0
+                        plan = self.set_budget_plan(network, self.horizon, B_total=B_total, step=step)
+
+                    network.set_budget(plan[plan_idx])
+                    plan_idx += 1
+
+                # Simulate Step
+                network.simulate_step(curing_strategy=self.curing_type)
+                U_bar, S_bar = network.get_network_metrics()
+                simulation_data[i, step] = [U_bar, S_bar]
+
+                if self.visualize:
+                    self.update_real_time_visualization(network, simulation_data[i], step, self.initial_conditions)
 
 
-
-            if visualize:
-                self.setup_real_time_visualization(network, num_steps, initial_conditions)
-                try:
-                    for step in range(num_steps):
-                        if not plt.fignum_exists(self.fig.number): #Checks if user closed the figure
-                            print("Figure closed by user, stopping simulation early.")
-                            break
-                    for step in range(num_steps):
-                        network.simulate_step(curing_strategy=curing_type)
-                        U_bar, S_bar = network.get_network_metrics()
-                        simulation_data[i, step] = [U_bar, S_bar]
-                        self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
-                        network.simulate_step()
-                        U_bar, S_bar = network.get_network_metrics()
-                        simulation_data[i, step] = [U_bar, S_bar]
-                        if step % redraw_every == 0 or step == num_steps - 1:
-                            self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
-
-                finally: #Closes figure
-                    plt.ioff()
-                    plt.close('all')
-            else:
-                for step in range(num_steps):
-                    network.simulate_step(curing_strategy=curing_type)
-                    U_bar, S_bar = network.get_network_metrics()
-                    simulation_data[i, step] = [U_bar, S_bar]
-
+            if self.visualize:
+                plt.ioff()
+                plt.close('all')
+                
         return simulation_data
+    
+    def set_budget_plan(self, network, horizon, B_total, step):
+        """
+        Returns the Plan for Budget Allocation over the finite time Horizon
+        """
+        #budget_plan
+        plan = []
+        plan_idx = 0
+        delta = B_total / 100
+        n_rollouts = 10
+        # Find the Budget Plan
+        # if you have total remaining budget for the entire run:
+        plan = budget_plan(network, budget=B_total, delta=delta, horizon=horizon, n_rollouts=n_rollouts, curing_strategy=self.curing_type, base_seed=123 + step)
+        print(plan)
+        return plan
+
+            
     def setup_real_time_visualization(self, network, num_steps, initial_conditions):
         plt.ion()
         self.fig, (self.ax_net, self.ax_met) = plt.subplots(
@@ -634,24 +659,24 @@ def main():
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--visualize", type=int, default=1)
-    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--visualize", type=int, default=0)
+    parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     parser.add_argument("--curing_type", type=str, default='gradient')
+    parser.add_argument("--horizon", type=int, default=1)
     args = parser.parse_args()
 
     # === Run Simulation === 
     total_simulation_data = []
     for i in range(len(args.initial_conditions)):
-        sim = SimulationRunner()
-        simulation_data = sim.run_simulation(
-            visualize=bool(args.visualize),
+        sim = SimulationRunner(visualize=bool(args.visualize),
             num_steps = args.steps,
             iterations = args.iterations,
             initial_conditions = args.initial_conditions[i],
             initial_nodes= 100,
-            curing_type=args.curing_type
-        )
+            curing_type=args.curing_type,
+            horizon=args.horizon)
+        simulation_data = sim.run_simulation()
         total_simulation_data.append(simulation_data)
 
 
@@ -670,6 +695,7 @@ def main():
         plt.plot(avg_S, label=f'S̄ₙ for Initial Conditions {args.initial_conditions[i]}', linewidth=2)
     plt.xlabel('Time Steps')
     plt.ylabel('Proportion')
+    plt.ylim(0, 0.6)
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.show()
