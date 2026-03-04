@@ -186,61 +186,47 @@ class Network:
                 self.graph
                 self.get_super_urn_proportion(1)
             case "centrality":
-                # --- baseline misinfo injection (uniform, every timestep) ---
+
                 for nid in self.graph.nodes():
-                    self.nodes[nid].urn_red += 5
-                # --- curing allocation (black balls) ---
+                    self.nodes[nid].delta_red = 15
+                # --- compute centrality ---
                 scores = nx.degree_centrality(self.graph)
-                N = self.graph.number_of_nodes()
-                budget_multiplier = 5
-                B = int(budget_multiplier * N) #total budget
 
-                candidates = list(self.graph.nodes())
-
-                #sort candidates by cenrality scores
-                candidates.sort(
-                    key=lambda nid: scores.get(nid, 0.0),
-                    reverse=True
-                )
-
-                central_priority = 2 #weight representing how strongly centrality is prioritized
-                proportion_priority = 2 #weight representing how strongly proportion of misinformed information is prioritized
-
+                # --- compute numerator weights ---
                 node_weight = {}
 
-                for nid in candidates:
-                    centrality_score = max(scores.get(nid, 0.0), 0.0)
-                    proportion_score = max(self.nodes[nid].get_proportion(), 0.0)
+                for nid in self.graph.nodes():
+                    degree_i = self.graph.degree[nid]                 # |N_i|
+                    C_i = max(scores.get(nid, 0.0), 0.0)              # centrality
 
-                # store each node's weight by node id
-                    node_weight[nid] = (
-                        (centrality_score ** central_priority)
-                        * (proportion_score ** proportion_priority)
-                    )
+                    node_weight[nid] = degree_i * C_i
 
-                # sum all weights (scalar)
+                # --- denominator ---
                 total_weight = float(sum(node_weight.values()))
 
-                allocation = {}
-                used = 0
+                # --- compute ratio r_i ---
+                ratio = {}
 
-                for nid, w in node_weight.items():
-                    balls = int(np.floor(B * (w / total_weight)))
-                    allocation[nid] = balls
-                    used += balls
+                if total_weight > 0:
+                    for nid, w in node_weight.items():
+                        ratio[nid] = w / total_weight
+                else:
+                    # if everything is zero, set uniform allocation
+                    N = self.graph.number_of_nodes()
+                    for nid in self.graph.nodes():
+                        ratio[nid] = 1.0 / N
 
-                leftover = B - used
-                i = 0
+                total_ratio = 0.0
+                for nid in sorted(ratio.keys()):
+                    print(f"Node {nid:3d}  r_i = {ratio[nid]:.6f}")
+                    total_ratio += ratio[nid]
 
-                while leftover > 0:
-                    nid = candidates[i]
-                    allocation[nid] += 1
-                    leftover -= 1
-                    i = (i + 1) % len(candidates)
+                budget_multiplier = 5
+                B = budget_multiplier * self.graph.number_of_nodes()
 
-                for nid, balls in allocation.items():
-                    if balls > 0:
-                        self.nodes[nid].urn_black += balls
+                for nid in ratio:
+                    balls = int(np.floor(B * ratio[nid]))
+                    self.nodes[nid].delta_black = balls + 5
              
 # ==========================================================
 # Simulation Runner with visualization
@@ -249,7 +235,9 @@ class SimulationRunner:
     def __init__(self):
         pass
 
-    def run_simulation(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type):
+    def run_simulation(self, visualize, num_steps, iterations,
+                   initial_conditions, initial_nodes,
+                   curing_type, cure_start_step):
     
         simulation_data = np.zeros((iterations, num_steps, 2))
         for i in range(iterations):
@@ -261,9 +249,8 @@ class SimulationRunner:
                 self.setup_real_time_visualization(network, num_steps, initial_conditions)
                 for step in range(num_steps):
                     network.simulate_step()
-                    # Only start curing once the network reaches 200 nodes
-                    if curing_type == "centrality" and len(network.nodes) >= 200:
-                        network.apply_curing("centrality")
+                    if curing_type is not None and step >= cure_start_step:
+                        network.apply_curing(curing_type)
                     U_bar, S_bar = network.get_network_metrics()
                     simulation_data[i, step] = [U_bar, S_bar]
                     self.update_real_time_visualization(network, simulation_data[i], step, initial_conditions)
@@ -403,7 +390,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     parser.add_argument("--curing_type", type=str, default='gradient')
-    parser.add_argument("--cure_start_nodes", type=int, default=200)
+    parser.add_argument("--cure_start_step", type=int, default= 0)
 
     args = parser.parse_args()
 
@@ -418,6 +405,7 @@ def main():
             initial_conditions = args.initial_conditions[i],
             initial_nodes= 100,
             curing_type=args.curing_type,
+            cure_start_step=args.cure_start_step,
         )
         total_simulation_data.append(simulation_data)
 
