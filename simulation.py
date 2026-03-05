@@ -443,14 +443,64 @@ class Network:
         if self.nodes[v].node_type == 'news':
             return NEWS_W_IN
 
-        src_type = self.nodes[u].node_type
-        if src_type == 'news':
-            return NEWS_W_OUT
-        elif src_type == 'influencer':
-            return INFLUENCER_W_OUT
-        else:
-            return USER_W_OUT
 
+    def apply_curing(self, curing_strategy):
+        match curing_strategy:
+            case "gradient":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+            case "heuristic":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+            case "supermartingale":
+                self.nodes
+                self.graph
+                self.get_super_urn_proportion(1)
+            case "centrality":
+
+                for nid in self.graph.nodes():
+                    self.nodes[nid].delta_red = 15
+                # --- compute centrality ---
+                scores = nx.degree_centrality(self.graph)
+
+                # --- compute numerator weights ---
+                node_weight = {}
+
+                for nid in self.graph.nodes():
+                    degree_i = self.graph.degree[nid]                 # |N_i|
+                    C_i = max(scores.get(nid, 0.0), 0.0)              # centrality
+
+                    node_weight[nid] = degree_i * C_i
+
+                # --- denominator ---
+                total_weight = float(sum(node_weight.values()))
+
+                # --- compute ratio r_i ---
+                ratio = {}
+
+                if total_weight > 0:
+                    for nid, w in node_weight.items():
+                        ratio[nid] = w / total_weight
+                else:
+                    # if everything is zero, set uniform allocation
+                    N = self.graph.number_of_nodes()
+                    for nid in self.graph.nodes():
+                        ratio[nid] = 1.0 / N
+
+                total_ratio = 0.0
+                for nid in sorted(ratio.keys()):
+                    print(f"Node {nid:3d}  r_i = {ratio[nid]:.6f}")
+                    total_ratio += ratio[nid]
+
+                budget_multiplier = 5
+                B = budget_multiplier * self.graph.number_of_nodes()
+
+                for nid in ratio:
+                    balls = int(np.floor(B * ratio[nid]))
+                    self.nodes[nid].delta_black = balls + 5
+             
 # ==========================================================
 # Simulation Runner with visualization
 # ==========================================================
@@ -664,6 +714,8 @@ def main():
     parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
     parser.add_argument("--curing_type", type=str, default='gradient')
     parser.add_argument("--horizon", type=int, default=1)
+    parser.add_argument("--cure_start_step", type=int, default= 0)
+
     args = parser.parse_args()
 
     # === Run Simulation === 
@@ -675,10 +727,11 @@ def main():
             initial_conditions = args.initial_conditions[i],
             initial_nodes= 100,
             curing_type=args.curing_type,
-            horizon=args.horizon)
+            horizon=args.horizon,
+            cure_start_step=args.cure_start_step
+        )
         simulation_data = sim.run_simulation()
         total_simulation_data.append(simulation_data)
-
 
     # === Data ===
     data = np.array(total_simulation_data)  
