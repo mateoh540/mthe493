@@ -2,11 +2,10 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-import time
 from collections import deque
 import argparse
 import pandas as pd
-import datetime
+from datetime import datetime
 import json
 from approximate_dp import budget_plan
 
@@ -378,34 +377,14 @@ class Network:
     #     draws = {i: 1 if np.random.random() < p else 0
     #              for i, p in self.cached_super_urn.items()}
     def simulate_step(self, curing_strategy: str = "none"):
-        """
-        One time-step of the network Polya process with optional curing.
-
-        curing_strategy:
-        - "none":    no extra curing this step (delta_black_step = 0 for everyone)
-        - "uniform": spread the budget B evenly across all nodes (sum x_i = B)
-        - "gradient":choose x on the simplex (sum x_i = B) to reduce expected next exposure
-
-        IMPORTANT:
-        - Step 1 decides x_i (curing amounts) for THIS step.
-        - Step 2 draws using CURRENT super-urn proportions (curing doesn't affect draws until next step).
-        - Step 3 updates urns using x_i only when a node draws black.
-        """
         node_ids = list(self.nodes.keys())
         N = len(node_ids)
         if N == 0:
             return
 
-        # ----------------------------
-        # 1) Choose curing allocation x
-        # ----------------------------
-        # If strategy needs a budget, ensure it exists.
-        if curing_strategy in ("uniform", "gradient"):
-            if self.budget_B is None:
-                raise ValueError(
-                    "budget_B is not set. Call network.set_budget(B) after initialization."
-                )
-            B = float(self.budget_B)
+        # Curing Strategy
+        # Total Budget is sum of delta_red
+        self.budget_B =  float(sum(self.nodes[i].delta_red for i in node_ids))
 
         if curing_strategy == "none":
             # Truly no curing this step
@@ -413,11 +392,46 @@ class Network:
 
         elif curing_strategy == "uniform":
             # Budget-feasible baseline: spread B evenly
-            x = {i: B / N for i in node_ids}
+            x = {i: self.budget_B / N for i in node_ids}
 
         elif curing_strategy == "gradient":
             # Budget-feasible optimization on simplex
             x = self.compute_curing_gradient_simplex(max_iters=10)
+
+        elif curing_strategy == 'centrality':
+            scores = nx.degree_centrality(self.graph)
+
+            # --- compute numerator weights ---
+            node_weight = {}
+
+            for nid in self.graph.nodes():
+                degree_i = self.graph.degree[nid]                 # |N_i|
+                C_i = max(scores.get(nid, 0.0), 0.0)              # centrality
+
+                node_weight[nid] = degree_i * C_i
+
+            # --- denominator ---
+            total_weight = float(sum(node_weight.values()))
+
+            # --- compute ratio r_i ---
+            ratio = {}
+
+            if total_weight > 0:
+                for nid, w in node_weight.items():
+                    ratio[nid] = w / total_weight
+            else:
+                # if everything is zero, set uniform allocation
+                N = self.graph.number_of_nodes()
+                for nid in self.graph.nodes():
+                    ratio[nid] = 1.0 / N
+
+            total_ratio = 0.0
+            for nid in sorted(ratio.keys()):
+                total_ratio += ratio[nid]
+
+            # Assign Ratio x Budget to each Node
+
+            x = {nid: int(np.floor(self.budget_B * ratio[nid])) for nid in node_ids}
 
         else:
             raise ValueError(
@@ -425,16 +439,12 @@ class Network:
                 "Use 'none', 'uniform', or 'gradient'."
             )
 
-        # ----------------------------
-        # 2) Draw from current super-urns
-        # ----------------------------
+        # Draw from Super Urn
         proportions = {i: self.get_super_urn_proportion(i) for i in node_ids}
         self.cached_super_urn = proportions
         draws = {i: 1 if np.random.random() < proportions[i] else 0 for i in node_ids}
 
-        # ----------------------------
-        # 3) Update urns using this step's curing x_i (only if draw is black)
-        # ----------------------------
+        #Update Urns
         for i, d in draws.items():
             self.nodes[i].update(d, delta_black_step=x[i])
 
@@ -443,64 +453,16 @@ class Network:
         if self.nodes[v].node_type == 'news':
             return NEWS_W_IN
 
+        src_type = self.nodes[u].node_type
+        if src_type == 'news':
+            return NEWS_W_OUT
+        elif src_type == 'influencer':
+            return INFLUENCER_W_OUT
+        else:
+            return USER_W_OUT
 
-    def apply_curing(self, curing_strategy):
-        match curing_strategy:
-            case "gradient":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
-            case "heuristic":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
-            case "supermartingale":
-                self.nodes
-                self.graph
-                self.get_super_urn_proportion(1)
-            case "centrality":
+        
 
-                for nid in self.graph.nodes():
-                    self.nodes[nid].delta_red = 15
-                # --- compute centrality ---
-                scores = nx.degree_centrality(self.graph)
-
-                # --- compute numerator weights ---
-                node_weight = {}
-
-                for nid in self.graph.nodes():
-                    degree_i = self.graph.degree[nid]                 # |N_i|
-                    C_i = max(scores.get(nid, 0.0), 0.0)              # centrality
-
-                    node_weight[nid] = degree_i * C_i
-
-                # --- denominator ---
-                total_weight = float(sum(node_weight.values()))
-
-                # --- compute ratio r_i ---
-                ratio = {}
-
-                if total_weight > 0:
-                    for nid, w in node_weight.items():
-                        ratio[nid] = w / total_weight
-                else:
-                    # if everything is zero, set uniform allocation
-                    N = self.graph.number_of_nodes()
-                    for nid in self.graph.nodes():
-                        ratio[nid] = 1.0 / N
-
-                total_ratio = 0.0
-                for nid in sorted(ratio.keys()):
-                    print(f"Node {nid:3d}  r_i = {ratio[nid]:.6f}")
-                    total_ratio += ratio[nid]
-
-                budget_multiplier = 5
-                B = budget_multiplier * self.graph.number_of_nodes()
-
-                for nid in ratio:
-                    balls = int(np.floor(B * ratio[nid]))
-                    self.nodes[nid].delta_black = balls + 5
-             
 # ==========================================================
 # Simulation Runner with visualization
 # ==========================================================
@@ -584,8 +546,7 @@ class SimulationRunner:
         plan = budget_plan(network, budget=B_total, delta=delta, horizon=horizon, n_rollouts=n_rollouts, curing_strategy=self.curing_type, base_seed=123 + step)
         print(plan)
         return plan
-
-            
+        
     def setup_real_time_visualization(self, network, num_steps, initial_conditions):
         plt.ion()
         self.fig, (self.ax_net, self.ax_met) = plt.subplots(
@@ -708,61 +669,47 @@ class SimulationRunner:
 def main():
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--steps", type=int, default=250)
     parser.add_argument("--visualize", type=int, default=0)
-    parser.add_argument("--iterations", type=int, default=100)
-    parser.add_argument("--initial_conditions", type=json.loads, default='[[5,5]]')
-    parser.add_argument("--curing_type", type=str, default='gradient')
+    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
+    parser.add_argument("--curing_types",type=str, default="uniform, gradient, centrality")
     parser.add_argument("--horizon", type=int, default=1)
-    parser.add_argument("--cure_start_step", type=int, default= 0)
-
     args = parser.parse_args()
 
+    # List of Curing Types
+    curing_types = [s.strip() for s in args.curing_types.split(",") if s.strip()]
+
     # === Run Simulation === 
-    total_simulation_data = []
-    for i in range(len(args.initial_conditions)):
+
+    results = {} 
+    for curing in curing_types:
         sim = SimulationRunner(visualize=bool(args.visualize),
             num_steps = args.steps,
             iterations = args.iterations,
-            initial_conditions = args.initial_conditions[i],
+            initial_conditions = args.initial_conditions,
             initial_nodes= 100,
-            curing_type=args.curing_type,
-            horizon=args.horizon,
-            cure_start_step=args.cure_start_step
+            curing_type=curing,
+            horizon=args.horizon
         )
         simulation_data = sim.run_simulation()
-        total_simulation_data.append(simulation_data)
+        results[curing] = np.array(simulation_data)
 
-    # === Data ===
-    data = np.array(total_simulation_data)  
-    print(data)
 
-    # === Plotting Final Results
+    # === Plotting Final Results ===
 
-    # Plot
-    # Calculate and plot averages
     plt.figure(figsize=(10, 6))
-    for i in range(len(args.initial_conditions)):
-        avg_S = np.mean(data[i, :, :, 1], axis=0)
-        avg_S = np.insert(avg_S, 0, 0.5)
-        plt.plot(avg_S, label=f'S̄ₙ for Initial Conditions {args.initial_conditions[i]}', linewidth=2)
+    for curing, data in results.items():
+        avg_S = np.mean(data[:, :, 1], axis=0)
+        df = pd.DataFrame(avg_S, columns=['S_bar'])
+        df.to_csv(f'results/data/{curing}_{args.iterations}_{args.steps}.csv', index=False)
+        plt.plot(avg_S, label=f'{curing}', linewidth=2)
     plt.xlabel('Time Steps')
-    plt.ylabel('Proportion')
+    plt.ylabel('S̄ₙ: Network Exposure')
     plt.ylim(0, 0.6)
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.show()
-
-    # Export all data
-    # initial_conditions, iterations, steps, metric = data.shape
-    # all_df = pd.DataFrame({
-    #     'initial_condition': np.repeat(range(initial_conditions), steps),
-    #     'iteration': np.repeat(range(iterations), steps),
-    #     'step': np.tile(range(steps), iterations),
-    #     'S_bar': data[:, :, 1].flatten()
-    # })
-    # all_df.to_csv('simulation_all_data.csv', index=False)
-
+    plt.savefig(f"results/figures/{args.iterations}_{args.steps}.png", dpi=200)
 
 if __name__ == "__main__":
     main()
