@@ -8,6 +8,7 @@ import pandas as pd
 from datetime import datetime
 import json
 from approximate_dp import budget_plan
+from evaluation_metrics import evaluate_all_strategies, summarize_results
 
 from matplotlib.colors import LinearSegmentedColormap
 
@@ -431,7 +432,7 @@ class Network:
 
             # Assign Ratio x Budget to each Node
 
-            x = {nid: int(np.floor(self.budget_B * ratio[nid])) for nid in node_ids}
+            x = {nid: self.budget_B * ratio[nid] for nid in node_ids}
 
         else:
             raise ValueError(
@@ -447,6 +448,8 @@ class Network:
         #Update Urns
         for i, d in draws.items():
             self.nodes[i].update(d, delta_black_step=x[i])
+
+        return x
 
 
     def edge_weight(self, u, v):
@@ -479,6 +482,7 @@ class SimulationRunner:
     def run_simulation(self):
         redraw_every = 10
         simulation_data = np.zeros((self.iterations, self.num_steps, 2))
+        curing_costs = np.zeros((self.iterations, self.num_steps))
         plan = []
         plan_idx = 0
 
@@ -518,7 +522,9 @@ class SimulationRunner:
                     plan_idx += 1
 
                 # Simulate Step
-                network.simulate_step(curing_strategy=self.curing_type)
+                x = network.simulate_step(curing_strategy=self.curing_type)
+                curing_costs[i, step] = np.sum(list(x.values()))
+
                 U_bar, S_bar = network.get_network_metrics()
                 simulation_data[i, step] = [U_bar, S_bar]
 
@@ -530,7 +536,7 @@ class SimulationRunner:
                 plt.ioff()
                 plt.close('all')
                 
-        return simulation_data
+        return simulation_data, curing_costs
     
     def set_budget_plan(self, network, horizon, B_total, step):
         """
@@ -663,6 +669,19 @@ class SimulationRunner:
         return [network.nodes[node_id].get_proportion() 
                 for node_id in network.graph.nodes()]
 
+def run_evaluation(results, curing_costs, iterations, steps, alpha=0.33):
+    evaluation_results = evaluate_all_strategies(results, curing_costs, alpha=alpha)
+    evaluation_df = summarize_results(evaluation_results)
+
+    print(evaluation_df)
+
+    evaluation_df.to_csv(
+        f"results/data/evaluation_metrics_{iterations}_{steps}.csv",
+        index=False
+    )
+
+    return evaluation_df
+
 # ==========================================================
 # Entry Point
 # ==========================================================
@@ -675,6 +694,7 @@ def main():
     parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
     parser.add_argument("--curing_types",type=str, default="uniform, gradient, centrality")
     parser.add_argument("--horizon", type=int, default=1)
+    parser.add_argument("--evaluate", type=int, default=0)
     args = parser.parse_args()
 
     # List of Curing Types
@@ -683,6 +703,7 @@ def main():
     # === Run Simulation === 
 
     results = {} 
+    curing_costs = {}
     for curing in curing_types:
         sim = SimulationRunner(visualize=bool(args.visualize),
             num_steps = args.steps,
@@ -692,10 +713,21 @@ def main():
             curing_type=curing,
             horizon=args.horizon
         )
-        simulation_data = sim.run_simulation()
+        simulation_data, cost_data = sim.run_simulation()
+
         results[curing] = np.array(simulation_data)
+        curing_costs[curing] = np.array(cost_data)
 
 
+    # === Evaluation Metrics ====
+    if args.evaluate:
+        run_evaluation(
+            results=results,
+            curing_costs=curing_costs,
+            iterations=args.iterations,
+            steps=args.steps,
+            alpha=0.10
+        )
     # === Plotting Final Results ===
 
     plt.figure(figsize=(10, 6))
