@@ -669,9 +669,9 @@ class SimulationRunner:
 def main():
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
-    parser.add_argument("--steps", type=int, default=250)
+    parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--visualize", type=int, default=0)
-    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--iterations", type=int, default=250)
     parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
     parser.add_argument("--curing_types",type=str, default="uniform, gradient, centrality")
     parser.add_argument("--horizon", type=int, default=1)
