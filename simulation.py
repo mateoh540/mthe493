@@ -84,8 +84,6 @@ class Network:
         self.graph = nx.DiGraph()
         self.p_dominating = 0.8  
         self.cached_super_urn = {} 
-
-        # Budget for curing per step (set later)
         self.budget_B = None
 
     def set_budget(self, B: float):
@@ -257,7 +255,7 @@ class Network:
 
 
     # ---------- Initializers ----------
-    def initialize_barabasi_albert(self, n, m, initial_conditions):
+    def initialize_barabasi_albert(self, n, m, additional_nodes, initial_conditions):
         ba_graph = nx.barabasi_albert_graph(n, m)
         
         centrality = nx.degree_centrality(ba_graph)
@@ -278,7 +276,7 @@ class Network:
             self.graph.add_edge(u, v, weight=self.edge_weight(u, v))
             self.graph.add_edge(v, u, weight=self.edge_weight(v, u))
 
-        self.switch_network(10)
+        self.switch_network(additional_nodes)
         
 
     # ---------- Switching dynamics ----------
@@ -369,14 +367,12 @@ class Network:
     def get_network_metrics(self):
         U_bar = np.mean([n.get_proportion() for n in self.nodes.values()])
         S_bar = np.mean([self.get_super_urn_proportion(i) for i in self.nodes.keys()])
-        return U_bar, S_bar
+        wasted_budget = 0.0
+        for nid in self.graph.nodes():
+            draw_result, _, delta_black_step = self.nodes[nid].draw_queue[-1]
+            wasted_budget += delta_black_step * draw_result
+        return U_bar, S_bar, wasted_budget
 
-    # ---------- Simulation step ----------
-    # def simulate_step(self):
-    #     self.cached_super_urn = {i: self.get_super_urn_proportion(i)
-    #                              for i in self.nodes.keys()}
-    #     draws = {i: 1 if np.random.random() < p else 0
-    #              for i, p in self.cached_super_urn.items()}
     def simulate_step(self, curing_strategy: str = "none"):
         node_ids = list(self.nodes.keys())
         N = len(node_ids)
@@ -391,15 +387,15 @@ class Network:
             # Truly no curing this step
             x = {i: 0.0 for i in node_ids}
 
-        elif curing_strategy == "uniform":
+        elif curing_strategy == "Uniform":
             # Budget-feasible baseline: spread B evenly
             x = {i: self.budget_B / N for i in node_ids}
 
-        elif curing_strategy == "gradient":
+        elif curing_strategy == "Gradient":
             # Budget-feasible optimization on simplex
             x = self.compute_curing_gradient_simplex(max_iters=10)
 
-        elif curing_strategy == 'centrality':
+        elif curing_strategy == 'Centrality':
             scores = nx.degree_centrality(self.graph)
 
             # --- compute numerator weights ---
@@ -431,14 +427,7 @@ class Network:
                 total_ratio += ratio[nid]
 
             # Assign Ratio x Budget to each Node
-
             x = {nid: self.budget_B * ratio[nid] for nid in node_ids}
-
-        else:
-            raise ValueError(
-                f"Unknown curing_strategy='{curing_strategy}'. "
-                "Use 'none', 'uniform', or 'gradient'."
-            )
 
         # Draw from Super Urn
         proportions = {i: self.get_super_urn_proportion(i) for i in node_ids}
@@ -470,31 +459,32 @@ class Network:
 # Simulation Runner with visualization
 # ==========================================================
 class SimulationRunner:
-    def __init__(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, curing_type, horizon):
+    def __init__(self, visualize, num_steps, iterations, initial_conditions, initial_nodes, additional_nodes,curing_type, horizon):
         self.visualize = visualize
         self.num_steps = num_steps
         self.iterations = iterations
         self.initial_conditions = initial_conditions
         self.initial_nodes = initial_nodes
+        self.additional_nodes = additional_nodes
         self.curing_type = curing_type
         self.horizon = horizon
 
     def run_simulation(self):
         redraw_every = 10
-        simulation_data = np.zeros((self.iterations, self.num_steps, 2))
+        simulation_data = np.zeros((self.iterations, self.num_steps, 4))
         curing_costs = np.zeros((self.iterations, self.num_steps))
         plan = []
         plan_idx = 0
 
         for i in range(self.iterations):
-            # Set Seed
+            # Set Seed``
             seed = 123 + i  # i = iteration
             random.seed(seed)
             np.random.seed(seed)
             # Create Network
             network = Network()
             m = 1
-            network.initialize_barabasi_albert(n=self.initial_nodes, m=m, initial_conditions=self.initial_conditions)  #Initialize the Graph
+            network.initialize_barabasi_albert(n=self.initial_nodes, m=m, additional_nodes = self.additional_nodes,initial_conditions=self.initial_conditions)  #Initialize the Graph
             # Calculate Budget
             Budget = len(network.nodes) * self.initial_conditions[1]
 
@@ -525,8 +515,8 @@ class SimulationRunner:
                 x = network.simulate_step(curing_strategy=self.curing_type)
                 curing_costs[i, step] = np.sum(list(x.values()))
 
-                U_bar, S_bar = network.get_network_metrics()
-                simulation_data[i, step] = [U_bar, S_bar]
+                U_bar, S_bar, wasted_budget = network.get_network_metrics()
+                simulation_data[i, step] = [U_bar, S_bar, wasted_budget, Budget]
 
                 if self.visualize:
                     self.update_real_time_visualization(network, simulation_data[i], step, self.initial_conditions)
@@ -688,11 +678,13 @@ def run_evaluation(results, curing_costs, iterations, steps, alpha=0.33):
 def main():
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
-    parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--visualize", type=int, default=0)
-    parser.add_argument("--iterations", type=int, default=250)
+    parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
-    parser.add_argument("--curing_types",type=str, default="uniform, gradient, centrality")
+    parser.add_argument("--initial_nodes", type=int, default='1000')
+    parser.add_argument("--additional_nodes", type=int, default='0')
+    parser.add_argument("--curing_types",type=str, default="Uniform, Centrality, Gradient")
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--evaluate", type=int, default=0)
     args = parser.parse_args()
@@ -709,7 +701,8 @@ def main():
             num_steps = args.steps,
             iterations = args.iterations,
             initial_conditions = args.initial_conditions,
-            initial_nodes= 100,
+            initial_nodes= args.initial_nodes,
+            additional_nodes=args.additional_nodes,
             curing_type=curing,
             horizon=args.horizon
         )
@@ -728,20 +721,86 @@ def main():
             steps=args.steps,
             alpha=0.10
         )
-    # === Plotting Final Results ===
 
-    plt.figure(figsize=(10, 6))
+
+    # === Plotting Final Results ===
+    style_map = {
+        "Uniform":    {"label": "(i) Uniform",    "marker": "s"},
+        "Centrality": {"label": "(ii) Centrality","marker": "^"},
+        "Gradient":   {"label": "(iii) Gradient",   "marker": "D"},
+    }
+    plt.rcParams.update({
+        "font.size": 12,
+        "axes.labelsize": 13,
+        "legend.fontsize": 11,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "figure.dpi": 150,
+    })
+
+    # Exposure
+    plt.figure(figsize=(10, 5))
     for curing, data in results.items():
         avg_S = np.mean(data[:, :, 1], axis=0)
-        df = pd.DataFrame(avg_S, columns=['S_bar'])
-        df.to_csv(f'results/data/{curing}_{args.iterations}_{args.steps}.csv', index=False)
-        plt.plot(avg_S, label=f'{curing}', linewidth=2)
-    plt.xlabel('Time Steps')
+        style = style_map.get(curing, {"label": curing, "marker": "o"})
+        plt.plot(
+            np.arange(1, len(avg_S) + 1),
+            avg_S,
+            label=style["label"],
+            linewidth=1.8,
+            marker=style["marker"],
+            markersize=7,
+            markevery=max(1, len(avg_S)//10)
+        )
+        
+    plt.xlabel('Time Step')
     plt.ylabel('S̄ₙ: Network Exposure')
+    plt.xlim(0, args.steps)
     plt.ylim(0, 0.6)
-    plt.legend()
+    plt.legend(frameon=True, fancybox=False, edgecolor="black")
     plt.grid(True, alpha=0.3)
-    plt.savefig(f"results/figures/{args.iterations}_{args.steps}.png", dpi=200)
+    plt.tight_layout()
+    plt.savefig(f"results/figures/network_exposure_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
+    plt.close()
 
+    # Wasted Curing
+    plt.figure(figsize=(10, 5))
+    for curing, data in results.items():
+        avg_wasted_budget = np.mean(data[:, :, 2], axis=0)
+        total_budget = np.mean(data[:, :, 3], axis=0)
+        style = style_map.get(curing, {"label": curing, "marker": "o"})
+        plt.plot(
+            np.arange(1, len(avg_wasted_budget) + 1),
+            avg_wasted_budget,
+            label=style["label"],
+            linewidth=1.8,
+            marker=style["marker"],
+            markersize=7,
+            markevery=max(1, len(avg_S)//10)
+        )
+    
+    plt.plot(
+            np.arange(1, len(total_budget) + 1),
+            total_budget,
+            label= 'Total Budget',
+            color='black',
+            linewidth=1.8,
+            linestyle=':'
+    )   
+    plt.xlabel('Time Step')
+    plt.ylabel('W: Wasted Budget')
+    plt.xlim(0, args.steps)
+    plt.legend(frameon=True, fancybox=False, edgecolor="black")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"results/figures/wasted_budget_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
+    plt.close()
+
+    for curing, data in results.items():
+        avg_S = np.mean(data[:, :, 1], axis=0)
+        avg_wasted_budget = np.mean(data[:, :, 2], axis=0)
+        df = pd.DataFrame({'S_bar': avg_S, 'W': avg_wasted_budget})
+        df.to_csv(f'results/data/{curing}_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.csv', index=False)
+    
 if __name__ == "__main__":
     main()
