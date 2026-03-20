@@ -2,6 +2,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+import logging
 from collections import deque
 import argparse
 import pandas as pd
@@ -257,9 +258,8 @@ class Network:
     # ---------- Initializers ----------
     def initialize_barabasi_albert(self, n, m, additional_nodes, initial_conditions):
         ba_graph = nx.barabasi_albert_graph(n, m)
-        
-        centrality = nx.degree_centrality(ba_graph)
-        top_3 = sorted(centrality, key=centrality.get, reverse=True)[:3]
+        self.centrality = nx.betweenness_centrality(ba_graph, weight=None, normalized=True)
+        top_3 = sorted(self.centrality, key=self.centrality.get, reverse=True)[:3]
         self.news_nodes = set(top_3)
 
         self.graph = nx.DiGraph()
@@ -277,6 +277,7 @@ class Network:
             self.graph.add_edge(v, u, weight=self.edge_weight(v, u))
 
         self.switch_network(additional_nodes)
+        self.compute_centrality_terms()
         
 
     # ---------- Switching dynamics ----------
@@ -367,11 +368,32 @@ class Network:
     def get_network_metrics(self):
         U_bar = np.mean([n.get_proportion() for n in self.nodes.values()])
         S_bar = np.mean([self.get_super_urn_proportion(i) for i in self.nodes.keys()])
+
         wasted_budget = 0.0
         for nid in self.graph.nodes():
-            draw_result, _, delta_black_step = self.nodes[nid].draw_queue[-1]
-            wasted_budget += delta_black_step * draw_result
+            if len(self.nodes[nid].draw_queue) > 0:
+                draw_result, _, delta_black_step = self.nodes[nid].draw_queue[-1]
+                wasted_budget += delta_black_step * draw_result
+
         return U_bar, S_bar, wasted_budget
+        
+    
+    def compute_centrality_terms(self):
+        node_ids = list(self.nodes.keys())
+        self.impact = {
+            i: sum(data.get("weight", 1.0) for _, _, data in self.graph.out_edges(i, data=True))
+            for i in node_ids
+        }
+
+        Gdist = nx.DiGraph()
+        Gdist.add_nodes_from(self.graph.nodes())   # <-- important
+
+        for u, v, data in self.graph.edges(data=True):
+            w = float(data.get("weight", 1.0))
+            if w > 0:
+                Gdist.add_edge(u, v, weight=1.0 / w)
+
+        self.centrality = nx.betweenness_centrality(Gdist, weight="weight", normalized=True)
 
     def simulate_step(self, curing_strategy: str = "none"):
         node_ids = list(self.nodes.keys())
@@ -381,7 +403,8 @@ class Network:
 
         # Curing Strategy
         # Total Budget is sum of delta_red
-        self.budget_B =  float(sum(self.nodes[i].delta_red for i in node_ids))
+        if self.budget_B is None:
+            self.budget_B = float(sum(self.nodes[i].delta_red for i in node_ids))
 
         if curing_strategy == "none":
             # Truly no curing this step
@@ -396,38 +419,17 @@ class Network:
             x = self.compute_curing_gradient_simplex(max_iters=10)
 
         elif curing_strategy == 'Centrality':
-            scores = nx.degree_centrality(self.graph)
-
-            # --- compute numerator weights ---
+            S_prev = {i: self.get_super_urn_proportion(i) for i in node_ids}
+            # Compute Ratios
             node_weight = {}
+            for i in node_ids:
+                node_weight[i] = self.impact[i] * self.centrality[i] * S_prev[i]
 
-            for nid in self.graph.nodes():
-                degree_i = self.graph.degree[nid]                 # |N_i|
-                C_i = max(scores.get(nid, 0.0), 0.0)              # centrality
-
-                node_weight[nid] = degree_i * C_i
-
-            # --- denominator ---
-            total_weight = float(sum(node_weight.values()))
-
-            # --- compute ratio r_i ---
-            ratio = {}
-
+            total_weight = sum(node_weight.values())
             if total_weight > 0:
-                for nid, w in node_weight.items():
-                    ratio[nid] = w / total_weight
+                x = {i: self.budget_B * node_weight[i] / total_weight for i in node_ids}
             else:
-                # if everything is zero, set uniform allocation
-                N = self.graph.number_of_nodes()
-                for nid in self.graph.nodes():
-                    ratio[nid] = 1.0 / N
-
-            total_ratio = 0.0
-            for nid in sorted(ratio.keys()):
-                total_ratio += ratio[nid]
-
-            # Assign Ratio x Budget to each Node
-            x = {nid: self.budget_B * ratio[nid] for nid in node_ids}
+                x = {i: self.budget_B / len(node_ids) for i in node_ids}
 
         # Draw from Super Urn
         proportions = {i: self.get_super_urn_proportion(i) for i in node_ids}
@@ -485,38 +487,42 @@ class SimulationRunner:
             network = Network()
             m = 1
             network.initialize_barabasi_albert(n=self.initial_nodes, m=m, additional_nodes = self.additional_nodes,initial_conditions=self.initial_conditions)  #Initialize the Graph
-            # Calculate Budget
-            Budget = len(network.nodes) * self.initial_conditions[1]
 
             # Run the Simulation
             if self.visualize:
                 self.setup_real_time_visualization(network, self.num_steps, self.initial_conditions)
 
-            for step in range(self.num_steps):
+        
+            # Set Budget
+            Budget = len(network.nodes) * self.initial_conditions[1]
+            if self.horizon <= 1:
+                network.set_budget(Budget)
+            else: # Create Budget Plan
+                B_total = self.horizon * Budget
+                plan = self.create_budget_plan(network, self.horizon, B_total=B_total)
+
+            U_bar, S_bar, wasted_budget = network.get_network_metrics()
+            simulation_data[i, 0] = [U_bar, S_bar, wasted_budget, Budget]
+
+
+            for step in range(self.num_steps - 1):
+                logging.info(f"Simulating step {step}")
                 if self.visualize and not plt.fignum_exists(self.fig.number): #Checks if user closed the figure
                     print("Figure closed by user, stopping simulation early.")
                     break
-
-                # Set Budget
-                if self.horizon <= 1:
-                    network.set_budget(Budget)
-                else:
-                    B_total = self.horizon * Budget
-
-                    # replan at block boundaries OR if plan is empty/exhausted
-                    if (step % self.horizon == 0) or (plan_idx >= len(plan)):
-                        plan_idx = 0
-                        plan = self.set_budget_plan(network, self.horizon, B_total=B_total, step=step)
-
-                    network.set_budget(plan[plan_idx])
-                    plan_idx += 1
+                
+                # Set Budget for this step
+                if (step % self.horizon == 0) or (plan_idx >= len(plan)):
+                    plan_idx = 0
+                network.set_budget(plan[plan_idx])
+                plan_idx += 1 
 
                 # Simulate Step
                 x = network.simulate_step(curing_strategy=self.curing_type)
                 curing_costs[i, step] = np.sum(list(x.values()))
 
                 U_bar, S_bar, wasted_budget = network.get_network_metrics()
-                simulation_data[i, step] = [U_bar, S_bar, wasted_budget, Budget]
+                simulation_data[i, step + 1] = [U_bar, S_bar, wasted_budget, Budget]
 
                 if self.visualize:
                     self.update_real_time_visualization(network, simulation_data[i], step, self.initial_conditions)
@@ -528,7 +534,7 @@ class SimulationRunner:
                 
         return simulation_data, curing_costs
     
-    def set_budget_plan(self, network, horizon, B_total, step):
+    def create_budget_plan(self, network, horizon, B_total):
         """
         Returns the Plan for Budget Allocation over the finite time Horizon
         """
@@ -539,7 +545,7 @@ class SimulationRunner:
         n_rollouts = 10
         # Find the Budget Plan
         # if you have total remaining budget for the entire run:
-        plan = budget_plan(network, budget=B_total, delta=delta, horizon=horizon, n_rollouts=n_rollouts, curing_strategy=self.curing_type, base_seed=123 + step)
+        plan = budget_plan(network, budget=B_total, delta=delta, horizon=horizon, n_rollouts=n_rollouts, curing_strategy=self.curing_type, base_seed=123, alpha=1)
         print(plan)
         return plan
         
@@ -676,27 +682,32 @@ def run_evaluation(results, curing_costs, iterations, steps, alpha=0.33):
 # Entry Point
 # ==========================================================
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s"
+    )
     # Arguments
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
-    parser.add_argument("--steps", type=int, default=300)
+    parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--visualize", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
-    parser.add_argument("--initial_nodes", type=int, default='1000')
+    parser.add_argument("--initial_nodes", type=int, default='100')
     parser.add_argument("--additional_nodes", type=int, default='0')
-    parser.add_argument("--curing_types",type=str, default="Uniform, Centrality, Gradient")
-    parser.add_argument("--horizon", type=int, default=1)
-    parser.add_argument("--evaluate", type=int, default=0)
+    parser.add_argument("--curing_types",type=str, default="Uniform, Centrality")
+    parser.add_argument("--horizon", type=int, default=10)
+    parser.add_argument("--evaluate", type=int, default=1)
     args = parser.parse_args()
 
     # List of Curing Types
     curing_types = [s.strip() for s in args.curing_types.split(",") if s.strip()]
 
     # === Run Simulation === 
-
+    logging.info("Starting Simulation with curing types: %s", curing_types)
     results = {} 
     curing_costs = {}
     for curing in curing_types:
+        logging.info("Simulating for curing type: %s", curing)
         sim = SimulationRunner(visualize=bool(args.visualize),
             num_steps = args.steps,
             iterations = args.iterations,
@@ -724,6 +735,7 @@ def main():
 
 
     # === Plotting Final Results ===
+    logging.info("Plotting Final Results")
     style_map = {
         "Uniform":    {"label": "(i) Uniform",    "marker": "s"},
         "Centrality": {"label": "(ii) Centrality","marker": "^"},
@@ -742,6 +754,7 @@ def main():
     plt.figure(figsize=(10, 5))
     for curing, data in results.items():
         avg_S = np.mean(data[:, :, 1], axis=0)
+
         style = style_map.get(curing, {"label": curing, "marker": "o"})
         plt.plot(
             np.arange(1, len(avg_S) + 1),
@@ -789,12 +802,15 @@ def main():
     )   
     plt.xlabel('Time Step')
     plt.ylabel('W: Wasted Budget')
-    plt.xlim(0, args.steps)
+    plt.xlim(2, args.steps)
     plt.legend(frameon=True, fancybox=False, edgecolor="black")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f"results/figures/wasted_budget_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
     plt.close()
+
+    # Save Data
+    logging.info("Saving simulation data to CSV")
 
     for curing, data in results.items():
         avg_S = np.mean(data[:, :, 1], axis=0)
@@ -802,5 +818,6 @@ def main():
         df = pd.DataFrame({'S_bar': avg_S, 'W': avg_wasted_budget})
         df.to_csv(f'results/data/{curing}_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.csv', index=False)
     
+    logging.info(f"Simulation finished")
 if __name__ == "__main__":
     main()
