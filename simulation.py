@@ -359,7 +359,7 @@ class Network:
         total_red = node.urn_red
         total_balls = node.urn_red + node.urn_black
         for nb in self.graph.predecessors(node_id):
-            weight = self.graph[node_id][nb]['weight']
+            weight = self.graph[nb][node_id]['weight']
             neighbor = self.nodes[nb]
             total_red += neighbor.urn_red * weight
             total_balls += (neighbor.urn_red + neighbor.urn_black) * weight
@@ -479,11 +479,14 @@ class SimulationRunner:
         plan_idx = 0
 
         for i in range(self.iterations):
+            logging.info(f"Iteration: {i}")
             # Set Seed``
-            seed = 123 + i  # i = iteration
+            seed = 100 + i  # i = iteration
             random.seed(seed)
             np.random.seed(seed)
+
             # Create Network
+            logging.info("Creating Network")
             network = Network()
             m = 1
             network.initialize_barabasi_albert(n=self.initial_nodes, m=m, additional_nodes = self.additional_nodes,initial_conditions=self.initial_conditions)  #Initialize the Graph
@@ -494,39 +497,46 @@ class SimulationRunner:
 
         
             # Set Budget
-            Budget = len(network.nodes) * self.initial_conditions[1]
+            # Set Budget
+            default_budget = len(network.nodes) * self.initial_conditions[1]
             if self.horizon <= 1:
-                network.set_budget(Budget)
-            else: # Create Budget Plan
-                B_total = self.horizon * Budget
+                network.set_budget(default_budget)
+            else:
+                B_total = self.horizon * default_budget
                 plan = self.create_budget_plan(network, self.horizon, B_total=B_total)
+                plan_idx = 0
+                network.set_budget(plan[plan_idx])
+                plan_idx += 1
 
             U_bar, S_bar, wasted_budget = network.get_network_metrics()
-            simulation_data[i, 0] = [U_bar, S_bar, wasted_budget, Budget]
+            actual_budget = network.budget_B if network.budget_B is not None else 0.0
+            simulation_data[i, 0] = [U_bar, S_bar, wasted_budget, actual_budget]
 
-
+            logging.info("Beginning Simulation")
             for step in range(self.num_steps - 1):
-                logging.info(f"Simulating step {step}")
                 if self.visualize and not plt.fignum_exists(self.fig.number): #Checks if user closed the figure
                     print("Figure closed by user, stopping simulation early.")
                     break
                 
-                # Set Budget for this step
-                if (step % self.horizon == 0) or (plan_idx >= len(plan)):
-                    plan_idx = 0
-                network.set_budget(plan[plan_idx])
-                plan_idx += 1 
+                if self.horizon > 1:
+                    # Set Budget for this step
+                    if (step % self.horizon == 0) or (plan_idx >= len(plan)):
+                        plan_idx = 0
+                    network.set_budget(plan[plan_idx])
+                    plan_idx += 1 
 
                 # Simulate Step
                 x = network.simulate_step(curing_strategy=self.curing_type)
                 curing_costs[i, step] = np.sum(list(x.values()))
 
                 U_bar, S_bar, wasted_budget = network.get_network_metrics()
-                simulation_data[i, step + 1] = [U_bar, S_bar, wasted_budget, Budget]
+                actual_budget = network.budget_B if network.budget_B is not None else 0.0
+                simulation_data[i, step + 1] = [U_bar, S_bar, wasted_budget, actual_budget]
+               
 
                 if self.visualize:
                     self.update_real_time_visualization(network, simulation_data[i], step, self.initial_conditions)
-
+            logging.info("Ending Simulation")
 
             if self.visualize:
                 plt.ioff()
@@ -568,12 +578,12 @@ class SimulationRunner:
         self.xlim = self.ax_net.get_xlim()
         self.ylim = self.ax_net.get_ylim()
 
-        self.metrics_line_s, = self.ax_met.plot([], [], 'g-', label=r'Network Exposure ($\bar{S}_n$)')
+        self.metrics_line_s, = self.ax_met.plot([], [], 'g-', label=r'$\tilde{S}_n$')
         self.ax_met.set_xlim(0, num_steps)
         self.ax_met.set_xticks(range(0, num_steps + 1, max(1, num_steps // 10)))
         self.ax_met.set_ylim(0, 1)
         self.ax_met.set_xlabel("Steps")
-        self.ax_met.set_ylabel("Proportion")
+        self.ax_met.set_ylabel(r'Network Exposure ($\tilde{S}_n$)')
         self.ax_met.legend()
         self.ax_met.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -647,35 +657,21 @@ class SimulationRunner:
             self.ylim = self.ax_net.get_ylim()
 
     def update_real_time_visualization(self, network, data, step, initial_conditions):
-        # Give positions to any new nodes without disturbing old ones
         self._update_positions_for_new_nodes(network)
-
-        # Redraw network with fixed layout & fixed axis limits
         self._draw_network(network, initial_conditions)
 
-        # Metrics panel stays dynamic
-        steps = np.arange(step + 1)
-        self.metrics_line_s.set_data(steps, data[:step + 1, 1])
-        self.ax_met.relim()
-        self.ax_met.autoscale_view()
+        steps = np.arange(step + 2)
+        self.metrics_line_s.set_data(steps, data[:step + 2, 1])
+
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
     def _get_node_colors(self, network):
-        return [network.nodes[node_id].get_proportion() 
-                for node_id in network.graph.nodes()]
+        return [network.get_super_urn_proportion(node_id) for node_id in network.graph.nodes()]
 
 def run_evaluation(results, curing_costs, iterations, steps, alpha=0.33):
     evaluation_results = evaluate_all_strategies(results, curing_costs, alpha=alpha)
     evaluation_df = summarize_results(evaluation_results)
-
-    print(evaluation_df)
-
-    evaluation_df.to_csv(
-        f"results/data/evaluation_metrics_{iterations}_{steps}.csv",
-        index=False
-    )
-
     return evaluation_df
 
 # ==========================================================
@@ -690,12 +686,12 @@ def main():
     parser = argparse.ArgumentParser(description="Run Polya Network Simulation")
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--visualize", type=int, default=0)
-    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--initial_conditions", type=json.loads, default='[5,5]')
-    parser.add_argument("--initial_nodes", type=int, default='100')
+    parser.add_argument("--initial_nodes", type=int, default='1000')
     parser.add_argument("--additional_nodes", type=int, default='0')
     parser.add_argument("--curing_types",type=str, default="Uniform, Centrality")
-    parser.add_argument("--horizon", type=int, default=10)
+    parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--evaluate", type=int, default=1)
     args = parser.parse_args()
 
@@ -725,12 +721,16 @@ def main():
 
     # === Evaluation Metrics ====
     if args.evaluate:
-        run_evaluation(
+        evaluation_df = run_evaluation(
             results=results,
             curing_costs=curing_costs,
             iterations=args.iterations,
             steps=args.steps,
             alpha=0.10
+        )
+        evaluation_df.to_csv(
+        f"results/data/evaluation_metrics_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_horizon_{args.horizon}_iterations_{args.iterations}_steps_{args.steps}.csv",
+        index=False
         )
 
 
@@ -767,46 +767,55 @@ def main():
         )
         
     plt.xlabel('Time Step')
-    plt.ylabel('S̄ₙ: Network Exposure')
+    plt.ylabel(r'$ \tilde S_t$: Network Exposure')
     plt.xlim(0, args.steps)
     plt.ylim(0, 0.6)
-    plt.legend(frameon=True, fancybox=False, edgecolor="black")
+    plt.legend(frameon=True, fancybox=False, edgecolor="black", loc='upper right')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"results/figures/network_exposure_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
+    plt.savefig(f"results/figures/network_exposure_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_horizon_{args.horizon}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
     plt.close()
 
     # Wasted Curing
     plt.figure(figsize=(10, 5))
     for curing, data in results.items():
-        avg_wasted_budget = np.mean(data[:, :, 2], axis=0)
-        total_budget = np.mean(data[:, :, 3], axis=0)
-        style = style_map.get(curing, {"label": curing, "marker": "o"})
-        plt.plot(
-            np.arange(1, len(avg_wasted_budget) + 1),
-            avg_wasted_budget,
-            label=style["label"],
-            linewidth=1.8,
-            marker=style["marker"],
-            markersize=7,
-            markevery=max(1, len(avg_S)//10)
+        ratio = np.divide(
+            data[:, :, 2],
+            data[:, :, 3],
+            out=np.zeros_like(data[:, :, 2], dtype=float),
+            where=data[:, :, 3] > 0
         )
-    
-    plt.plot(
-            np.arange(1, len(total_budget) + 1),
-            total_budget,
-            label= 'Total Budget',
-            color='black',
-            linewidth=1.8,
-            linestyle=':'
-    )   
+        avg_wasted_budget_ratio = np.mean(ratio, axis=0)
+        style = style_map.get(curing, {"label": curing, "marker": "o"})
+        if args.horizon > 1:
+            avg_wasted_budget_ratio = np.where(avg_wasted_budget_ratio == 0,
+                                       np.nan,
+                                       avg_wasted_budget_ratio)
+            plt.scatter(
+                np.arange(1, len(avg_wasted_budget_ratio) + 1),
+                avg_wasted_budget_ratio,
+                label=style["label"],
+                marker=style["marker"],
+                s=40
+            )
+        else: 
+            plt.plot(
+                np.arange(1, len(avg_wasted_budget_ratio) + 1),
+                avg_wasted_budget_ratio,
+                label=style["label"],
+                linewidth=1.8,
+                marker=style["marker"],
+                markersize=7,
+                markevery=max(1, len(avg_S)//10)
+            )
+  
     plt.xlabel('Time Step')
-    plt.ylabel('W: Wasted Budget')
+    plt.ylabel(r'$W_t$: Wasted Budget Ratio')
     plt.xlim(2, args.steps)
-    plt.legend(frameon=True, fancybox=False, edgecolor="black")
+    plt.legend(frameon=True, fancybox=False, edgecolor="black", loc='upper right')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"results/figures/wasted_budget_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
+    plt.savefig(f"results/figures/wasted_budget_ratio_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_horizon_{args.horizon}_iterations_{args.iterations}_steps_{args.steps}.png", dpi=200)
     plt.close()
 
     # Save Data
@@ -814,9 +823,15 @@ def main():
 
     for curing, data in results.items():
         avg_S = np.mean(data[:, :, 1], axis=0)
-        avg_wasted_budget = np.mean(data[:, :, 2], axis=0)
-        df = pd.DataFrame({'S_bar': avg_S, 'W': avg_wasted_budget})
-        df.to_csv(f'results/data/{curing}_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_iterations_{args.iterations}_steps_{args.steps}.csv', index=False)
+        ratio = np.divide(
+            data[:, :, 2],
+            data[:, :, 3],
+            out=np.zeros_like(data[:, :, 2], dtype=float),
+            where=data[:, :, 3] > 0
+        )
+        avg_wasted_budget_ratio = np.mean(ratio, axis=0)
+        df = pd.DataFrame({'S_bar': avg_S, 'W': avg_wasted_budget_ratio})
+        df.to_csv(f'results/data/{curing}_initial_nodes_{args.initial_nodes}_additional_nodes_{args.additional_nodes}_horizon_{args.horizon}_iterations_{args.iterations}_steps_{args.steps}.csv', index=False)
     
     logging.info(f"Simulation finished")
 if __name__ == "__main__":
